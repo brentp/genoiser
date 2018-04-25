@@ -1,0 +1,10 @@
+nimcache
+*.bam
+*.bed
+src/mosfun
+*.cram
+*.bai
+*.crai
+profile_results.txt
+t.*.bed.gz
+t.*.bed.gz.csi
