@@ -30,9 +30,6 @@ type
     upd: int
     ## index of the file
 
-  ## fun takes a variant and appends ranges into posns that should be incremented in an array.
-  fun* = proc(aln:Record, posns:var seq[mrange])
-
 proc accumulater[T](c: var seq[T]) =
   # convert from an array of start/end inc/decs to actual coverage.
   var tracker = T(0)
@@ -56,8 +53,13 @@ iterator mranges*[T](depth: var seq[T], values: var seq[T]): mpair =
       last_pair = (d, v)
   if last_pair[1] != 0:
     yield (last_i, len(depth), last_pair[0].int, last_pair[1].int)
-      
-proc mosfun*(bam: Bam, chrom: string, counts: var seq[seq[int32]], fs: seq[fun]) =
+
+type
+  Fun* = ref object
+    values*: seq[int32]
+    f*: proc(aln:Record, posns:var seq[mrange])
+
+proc mosfun*(bam: Bam, chrom: string, funs: seq[Fun]) =
   ## for the chromosome given, call each f in fs if skip_fun returns false and return
   ## an array for each function in fs.
 
@@ -70,25 +72,23 @@ proc mosfun*(bam: Bam, chrom: string, counts: var seq[seq[int32]], fs: seq[fun])
   if tid == -1:
     raise newException(KeyError, "chromosome not found:" & chrom)
 
-  if counts.len != fs.len:
-    counts = new_seq[seq[int32]](fs.len)
-  for i, c in counts:
-    if c.len != tlen:
+  for i, f in funs:
+    if f.values == nil or f.values.len != tlen:
       echo "creating new seq"
-      counts[i] = new_seq[int32](tlen)
+      f.values = new_seq[int32](tlen)
 
   var posns = new_seq_of_cap[mrange](200)
 
   for record in bam.queryi(tid, 0, tlen):
-    for i, f in fs:
+    for i, f in funs:
       if posns.len != 0: posns.set_len(0)
-      f(record, posns)
+      f.f(record, posns)
       for se in posns:
-        counts[i][se.start] += int32(se.count)
-        counts[i][se.stop] -= int32(se.count)
+        f.values[se.start] += int32(se.count)
+        f.values[se.stop] -= int32(se.count)
 
-  for c in counts.mitems:
-    accumulater(c)
+  for f in funs:
+    accumulater(f.values)
 
 proc softfun*(aln:Record, posns:var seq[mrange]) =
   ## softfun an example of a `fun` that can be sent to `mosfun`.
@@ -266,17 +266,42 @@ proc depthfun*(aln:Record, posns:var seq[mrange]) =
   if f.unmapped or f.secondary or f.qcfail or f.dup: return
   refposns(aln, posns)
 
+proc concordant(aln:Record): bool {.inline.} =
+  if aln.tid != aln.mate_tid: return false
+  # TODO: make these data-driven
+  if aln.isize.abs > 600: return
+  if aln.isize.abs < 50: return
+  var f = aln.flag
+  # check we have +- orientation.
+  return f.reverse != f.mate_reverse and aln.start > aln.mate_pos == f.reverse
+
 proc fragfun*(aln:Record, posns:var seq[mrange]) =
+  ## if true proper pair, then increment the entire fragment. otherwise, increment
+  ## the start and end of each read separately.
+  #if aln.mapping_quality < 5: return
   var f = aln.flag
   if f.unmapped or f.secondary or f.qcfail or f.dup: return
-  if aln.mapping_quality < 20: return
+  #if aln.tid != aln.mate_tid: return
   #if not f.proper_pair: return
+  if aln.concordant:
+    # only count the fragment once.
+    if f.reverse: return
+    if aln.isize < 0:
+      quit "BAD"
+    posns.add((aln.start, aln.start + aln.isize, 1))
+  else:
+    echo aln.flag
+    #echo "disconcordant"
+    #posns.add((aln.start, aln.stop, 1))
 
-  if aln.stop > aln.mate_pos: return
-  if aln.isize > 400: return
-  if aln.isize < 200: return
-  posns.add((aln.start, aln.start + aln.isize, 1))
-  echo aln.start, " ", aln.stop, " ", aln.mate_pos, " ", aln.start + aln.isize, " ", aln.isize, " ", f.proper_pair
+proc weird*(aln:Record, posns:var seq[mrange]) =
+  ## weird increments from read-start to end for paired reads that are not in the usual orientation.
+  var f = aln.flag
+  if f.mate_unmapped or f.unmapped or f.secondary or f.qcfail or f.dup: return
+  #if aln.stop > aln.mate_pos: return
+  if aln.tid != aln.mate_tid: return
+  if f.reverse == f.mate_reverse or aln.start < aln.mate_pos == f.reverse:
+    posns.add((aln.start, aln.stop, 1))
 
 proc mq0fun*(aln:Record, posns:var seq[mrange]) =
   ## this is an example function that increments all reference locations with mapping-quality 0.
@@ -284,7 +309,6 @@ proc mq0fun*(aln:Record, posns:var seq[mrange]) =
   var f = aln.flag
   if f.unmapped or f.qcfail or f.dup: return
   refposns(aln, posns)
-
 
 proc interchromosomal_splitter*(aln:Record, posns:var seq[mrange]) =
   for sp in aln.splitters:
@@ -317,6 +341,7 @@ Arguments:
 
 Options:
   -e --expr <string>            per-sample filtering expression [default: "(value > 0) & ((value / depth) > 0.1)"]
+  -z --zero                     output zero values.
   -h --help                     show help
   """)
 
@@ -329,6 +354,7 @@ Options:
     quit "error with expression"
   var vc = "value".cstring
   var dc = "depth".cstring
+  var zeros = args["--zero"] == true # force boolean
 
   proc sample_ok(depth:int, value:int): bool =
     discard ke_set_int(ex.ke, vc, value)
@@ -337,7 +363,19 @@ Options:
     if ex.error() != 0:
       quit format("expresion error with value:$# depth:$#", value, depth)
   for iv in aggregator(@(args["<per-sample-output>"]), sample_ok):
+    if iv.count == 0 and not zeros: continue
     stdout.write_line iv.chrom & "\t" & intToStr(iv.start) & "\t" & intToStr(iv.stop) & "\t" & intToStr(iv.count)
+
+proc writefn(a:Fun, depths:Fun, path:string, chrom:string, min_depth:int=0, min_value:int=1) =
+  var fh:File
+  if not open(fh, path, fmWrite):
+    quit(2)
+  for m in mranges(depths.values, a.values):
+    if m.depth < min_depth: continue
+    if m.value < min_value: continue
+    fh.write_line chrom & "\t" & intToStr(m.start) & "\t" & intToStr(m.stop) & "\t" & intToStr(m.depth) & "\t" & intToStr(m.value)
+
+  fh.close()
 
 
 proc per_sample_main(argv: seq[string]) =
@@ -378,61 +416,25 @@ Options:
     quit "coudn't open bam index for " & fbam
 
   for target in b.hdr.targets:
-    if target.name != "chr17": continue
-    var softs = new_seq[int32](target.length); shallow(softs)
-    var mq0 = new_seq[int32](target.length); shallow(mq0)
-    var depths = new_seq[int32](target.length); shallow(depths)
-    var inters = new_seq[int32](target.length); shallow(inters)
-    var splits = new_seq[int32](target.length); shallow(splits)
-    var frag_depths = new_seq[int32](target.length); shallow(frag_depths)
+    #if target.name != "1": continue
+    #if target.name != "chr17": continue
+    stderr.write_line target.name
+    var softs = Fun(values:new_seq[int32](target.length), f:softfun)
+    var mq0 = Fun(values:new_seq[int32](target.length), f:mq0fun)
+    var depths = Fun(values:new_seq[int32](target.length), f:depthfun)
+    var inters = Fun(values:new_seq[int32](target.length), f:interchromosomal)
+    var frag_depths = Fun(values:new_seq[int32](target.length), f:fragfun)
+    GC_fullCollect()
 
-    var counts = @[softs, mq0, depths, inters, splits, frag_depths]
-    mosfun(b, target.name, counts, @[fun(softfun), fun(mq0fun), fun(depthfun), fun(interchromosomal), fun(interchromosomal_splitter), fun(fragfun)])
+    var fns = @[softs, mq0, depths, inters, frag_depths]
+    mosfun(b, target.name, fns)
 
-    var fs, f0, fi, fspl, ffrag, fdepth:File
-    if not open(fs, prefix & "." & target.name & ".soft.bed", fmWrite):
-      quit(2)
-    if not open(f0, prefix & "." & target.name & ".mq0.bed", fmWrite):
-      quit(2)
-    if not open(fdepth, prefix & "." & target.name & ".depth.bed", fmWrite):
-      quit(2)
-    if not open(fi, prefix & "." & target.name & ".interchrom.bed", fmWrite):
-      quit(2)
-    if not open(fspl, prefix & "." & target.name & ".splits.bed", fmWrite):
-      quit(2)
-    if not open(ffrag, prefix & "." & target.name & ".frag.bed", fmWrite):
-      quit(2)
-
-
-    for m in mranges(depths, mq0):
-      if m.depth < min_depth: continue
-      if m.value < min_value: continue
-      f0.write_line target.name & "\t" & intToStr(m.start) & "\t" & intToStr(m.stop) & "\t" & intToStr(m.depth) & "\t" & intToStr(m.value)
-
-    for m in mranges(depths, splits):
-      if m.depth < min_depth: continue
-      if m.value < min_value: continue
-      fspl.write_line target.name & "\t" & intToStr(m.start) & "\t" & intToStr(m.stop) & "\t" & intToStr(m.depth) & "\t" & intToStr(m.value)
-
-    for m in mranges(depths, softs):
-      if m.depth < min_depth: continue
-      if m.value < min_value: continue
-      fs.write_line target.name & "\t" & intToStr(m.start) & "\t" & intToStr(m.stop) & "\t" & intToStr(m.depth) & "\t" & intToStr(m.value)
-
-    for m in mranges(depths, inters):
-      if m.depth < min_depth: continue
-      if m.value < min_value: continue
-      fi.write_line target.name & "\t" & intToStr(m.start) & "\t" & intToStr(m.stop) & "\t" & intToStr(m.depth) & "\t" & intToStr(m.value)
-
-    for m in mranges(depths, frag_depths):
-      #if m.depth < min_depth: continue
-      #if m.value < min_value: continue
-      ffrag.write_line target.name & "\t" & intToStr(m.start) & "\t" & intToStr(m.stop) & "\t" & intToStr(m.depth) & "\t" & intToStr(m.value)
+    writefn(softs, depths, prefix & "." & target.name & ".soft.bed", target.name, min_depth=min_depth, min_value=min_value)
+    writefn(mq0, depths, prefix & "." & target.name & ".mq0.bed", target.name, min_depth=min_depth, min_value=min_value)
+    writefn(inters, depths, prefix & "." & target.name & ".inters.bed", target.name, min_depth=min_depth, min_value=min_value)
+    writefn(frag_depths, depths, prefix & "." & target.name & ".frags.bed", target.name, min_depth=min_depth, min_value=min_value)
 
     GC_fullCollect()
-    fi.close(); f0.close(); fs.close(); fspl.close(); ffrag.close()
-    #echo "debug: breaking early"
-    #break
 
 
 var progs = {
