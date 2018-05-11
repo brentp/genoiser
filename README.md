@@ -6,7 +6,13 @@ int32's to track sequencing depth. This is [fast and flexible](https://brentp.gi
 given `mosdepth` as a special-case for *depth*, `mosfun` is a general case for user-defined functions.
 `mosdepth` could be implemented with `mosfun`.
 
-This library is in progress. The idea is that `mosfun` handles all accounting, a user
+An added benefit is the reduction of memory; `mosdepth` allocates an int32 array the size of each
+chromosome--meaning about 1GB of memory for chromosome 1. `mosfun` can use smaller-sized chunks to
+tile across each chromosome. This is important because it uses 1 array for each user-defined function.
+It defaults to 8 megabase chunks as that is the smallest size with no noticeable effect on performance
+in our tests. Chunk sizes down to 100KB have some, but minor effect on performance.
+
+The idea is of `mosfun` is that it will handle all accounting, a user
 simply defines a [nim](https://nim-lang.org) function that takes an alignment and then
 indicates which genomic positions to increment. For example, to calculate depth, this user
 function would increment from start to end:

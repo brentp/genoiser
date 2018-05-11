@@ -59,7 +59,7 @@ type
     values*: seq[int32]
     f*: proc(aln:Record, posns:var seq[mrange])
 
-proc mosfun*(bam: Bam, chrom: string, funs: seq[Fun]) =
+proc mosfun*(bam: Bam, funs: seq[Fun], chrom: string, start:int, stop:int) =
   ## for the chromosome given, call each f in fs if skip_fun returns false and return
   ## an array for each function in fs.
 
@@ -73,19 +73,28 @@ proc mosfun*(bam: Bam, chrom: string, funs: seq[Fun]) =
     raise newException(KeyError, "chromosome not found:" & chrom)
 
   for i, f in funs:
-    if f.values == nil or f.values.len != tlen:
+    if f.values == nil or f.values.len != stop - start + 1:
       echo "creating new seq"
-      f.values = new_seq[int32](tlen)
+      f.values = new_seq[int32](stop - start)
 
   var posns = new_seq_of_cap[mrange](200)
 
-  for record in bam.queryi(tid, 0, tlen):
+  for record in bam.queryi(tid, max(0, start - 1), stop + 1):
     for i, f in funs:
       if posns.len != 0: posns.set_len(0)
       f.f(record, posns)
       for se in posns:
-        f.values[se.start] += int32(se.count)
-        f.values[se.stop] -= int32(se.count)
+        var se_start = max(0, se.start - start)
+        if se_start >= f.values.len:
+          continue
+        var se_stop = se.stop - start
+        if se_stop < 0:
+          continue
+        if se_stop >= f.values.len:
+          se_stop = f.values.len - 1
+
+        f.values[se_start] += int32(se.count)
+        f.values[se_stop] -= int32(se.count)
 
   for f in funs:
     accumulater(f.values)
@@ -377,17 +386,17 @@ Options:
     if iv.count == 0 and not zeros: continue
     stdout.write_line iv.chrom & "\t" & intToStr(iv.start) & "\t" & intToStr(iv.stop) & "\t" & intToStr(iv.count)
 
-proc writefn(a:Fun, depths:Fun, path:string, chrom:string, min_depth:int=0, min_value:int=1) =
-  var fh:File
-  if not open(fh, path, fmWrite):
-    quit(2)
+proc writefn(a:Fun, depths:Fun, fh:File, chrom:string, start:int, min_depth:int=0, min_value:int=1) =
   for m in mranges(depths.values, a.values):
     if m.depth < min_depth: continue
     if m.value < min_value: continue
-    fh.write_line chrom & "\t" & intToStr(m.start) & "\t" & intToStr(m.stop) & "\t" & intToStr(m.depth) & "\t" & intToStr(m.value)
+    fh.write_line chrom & "\t" & intToStr(m.start + start) & "\t" & intToStr(m.stop + start) & "\t" & intToStr(m.depth) & "\t" & intToStr(m.value)
 
-  fh.close()
-
+proc myopen(path:string): File =
+  var fh:File
+  if not open(fh, path, fmWrite):
+    quit(2)
+  return fh
 
 proc per_sample_main(argv: seq[string]) =
 
@@ -426,28 +435,51 @@ Options:
   if b.idx == nil:
     quit "coudn't open bam index for " & fbam
 
+  var L = 8000000
+  var depths = Fun(values:new_seq[int32](L+1), f:depthfun)
+  var softs = Fun(values:new_seq[int32](L+1), f:softfun)
+  var mq0 = Fun(values:new_seq[int32](L+1), f:mq0fun)
+  var weirds = Fun(values:new_seq[int32](L+1), f:weird)
+  var misms = Fun(values:new_seq[int32](L+1), f:mismatchfun)
+  var inters = Fun(values:new_seq[int32](L+1), f:interchromosomal)
+  var fns = @[depths, softs, mq0, weirds, misms, inters]
+
   for target in b.hdr.targets:
-    #if target.name != "1": continue
+
+    # NOTE: fragile. make sure these are same orders as fns array above.
+    var fhs = [
+      myopen(prefix & "." & target.name & ".soft.bed"),
+      myopen(prefix & "." & target.name & ".mq0.bed"),
+      myopen(prefix & "." & target.name & ".weird.bed"),
+      myopen(prefix & "." & target.name & ".mismatches.bed"),
+      myopen(prefix & "." & target.name & ".interchromosomal.bed"),
+    ]
+
     stderr.write_line target.name
-    var depths = Fun(values:new_seq[int32](target.length), f:depthfun)
-    var softs = Fun(values:new_seq[int32](target.length), f:softfun)
-    var mq0 = Fun(values:new_seq[int32](target.length), f:mq0fun)
-    var weirds = Fun(values:new_seq[int32](target.length), f:weird)
-    var misms = Fun(values:new_seq[int32](target.length), f:mismatchfun)
-    var inters = Fun(values:new_seq[int32](target.length), f:interchromosomal)
-    GC_fullCollect()
+    var start = 0
+    while start < target.length.int:
+      var stop = min(start + L, target.length.int)
+      #echo "start..stop:", $start, "..", $stop
+      if stop - start + 1 != fns[0].values.len:
+        if start != 0 and stop != target.length.int:
+          echo "resizing"
+        for f in fns:
+          f.values.set_len(stop - start + 1)
+      for f in fns:
+        zeroMem(f.values[0].addr.pointer, f.values.len * sizeof(f.values[0]))
 
-    var fns = @[depths, softs, mq0, weirds, misms, inters]
-    mosfun(b, target.name, fns)
+      mosfun(b, fns, target.name, start, stop)
 
-    writefn(softs, depths, prefix & "." & target.name & ".soft.bed", target.name, min_depth=min_depth, min_value=min_value)
-    writefn(mq0, depths, prefix & "." & target.name & ".mq0.bed", target.name, min_depth=min_depth, min_value=min_value)
-    writefn(misms, depths, prefix & "." & target.name & ".mismatches.bed", target.name, min_depth=min_depth, min_value=min_value)
-    writefn(weirds, depths, prefix & "." & target.name & ".weird.bed", target.name, min_depth=min_depth, min_value=min_value)
-    writefn(inters, depths, prefix & "." & target.name & ".interchromosomals.bed", target.name, min_depth=min_depth, min_value=min_value)
+      writefn(softs, depths, fhs[0], target.name, start, min_depth=min_depth, min_value=min_value)
+      writefn(mq0, depths, fhs[1], target.name, start, min_depth=min_depth, min_value=min_value)
+      writefn(misms, depths, fhs[2], target.name, start, min_depth=min_depth, min_value=min_value)
+      writefn(weirds, depths, fhs[3], target.name, start, min_depth=min_depth, min_value=min_value)
+      writefn(inters, depths, fhs[4], target.name, start, min_depth=min_depth, min_value=min_value)
 
-    GC_fullCollect()
-    break
+      start += L
+
+    for f in fhs:
+      f.close()
 
 
 var progs = {
@@ -460,7 +492,7 @@ var helps = {
    "aggregate": "aggregate many sample outputs of per-sample into single file"
 }.toTable
 
-const version = "0.0.1"
+const version = "0.0.2"
 
 proc main() =
 
