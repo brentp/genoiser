@@ -37,7 +37,7 @@ proc accumulater[T](c: var seq[T]) =
     tracker += v
     c[i] = tracker
 
-iterator mranges*[T](depth: var seq[T], values: var seq[T]): mpair =
+iterator mranges*[T](depth: var seq[T], values: var seq[T]): mpair {.inline.} =
   ## merge intervals+values where consecutive values and depths are unchanged
   if len(depth) != len(values):
     raise newException(ValueError, "mosfun:expected equal length arrays")
@@ -275,6 +275,14 @@ proc concordant(aln:Record): bool {.inline.} =
   # check we have +- orientation.
   return f.reverse != f.mate_reverse and aln.start > aln.mate_pos == f.reverse
 
+proc mismatchfun(aln:Record, posns: var seq[mrange]) =
+  var f = aln.flag
+  if f.unmapped or f.secondary or f.qcfail or f.dup: return
+  var nm = tag[int](aln, "NM")
+  if nm.isNone or nm.get < 3: return
+  posns.add((aln.start, aln.stop, 1))
+
+
 proc fragfun*(aln:Record, posns:var seq[mrange]) =
   ## if true proper pair, then increment the entire fragment. otherwise, increment
   ## the start and end of each read separately.
@@ -289,10 +297,11 @@ proc fragfun*(aln:Record, posns:var seq[mrange]) =
     if aln.isize < 0:
       quit "BAD"
     posns.add((aln.start, aln.start + aln.isize, 1))
-  else:
-    echo aln.flag
+  #else:
+    #echo aln.flag
     #echo "disconcordant"
     #posns.add((aln.start, aln.stop, 1))
+
 
 proc weird*(aln:Record, posns:var seq[mrange]) =
   ## weird increments from read-start to end for paired reads that are not in the usual orientation.
@@ -322,11 +331,11 @@ proc interchromosomal*(aln:Record, posns:var seq[mrange]) =
   var f = aln.flag
   if f.unmapped or f.secondary or f.qcfail or f.dup: return
   if aln.b.core.tid == aln.b.core.mtid:
-    #if aln.b.core.tid == -1:
-    #  return
-    #interchromosomal_splitter(aln, posns)
+    if abs(aln.start - aln.mate_pos) > 10000000:
+      refposns(aln, posns)
     return
   if aln.b.core.tid == -1 or aln.b.core.mtid == -1: return
+  # on different chroms
   refposns(aln, posns)
 
 proc aggregate_main(argv: seq[string]) =
@@ -362,6 +371,8 @@ Options:
     result = ex.get_bool()
     if ex.error() != 0:
       quit format("expresion error with value:$# depth:$#", value, depth)
+
+
   for iv in aggregator(@(args["<per-sample-output>"]), sample_ok):
     if iv.count == 0 and not zeros: continue
     stdout.write_line iv.chrom & "\t" & intToStr(iv.start) & "\t" & intToStr(iv.stop) & "\t" & intToStr(iv.count)
@@ -417,24 +428,26 @@ Options:
 
   for target in b.hdr.targets:
     #if target.name != "1": continue
-    #if target.name != "chr17": continue
     stderr.write_line target.name
+    var depths = Fun(values:new_seq[int32](target.length), f:depthfun)
     var softs = Fun(values:new_seq[int32](target.length), f:softfun)
     var mq0 = Fun(values:new_seq[int32](target.length), f:mq0fun)
-    var depths = Fun(values:new_seq[int32](target.length), f:depthfun)
+    var weirds = Fun(values:new_seq[int32](target.length), f:weird)
+    var misms = Fun(values:new_seq[int32](target.length), f:mismatchfun)
     var inters = Fun(values:new_seq[int32](target.length), f:interchromosomal)
-    var frag_depths = Fun(values:new_seq[int32](target.length), f:fragfun)
     GC_fullCollect()
 
-    var fns = @[softs, mq0, depths, inters, frag_depths]
+    var fns = @[depths, softs, mq0, weirds, misms, inters]
     mosfun(b, target.name, fns)
 
     writefn(softs, depths, prefix & "." & target.name & ".soft.bed", target.name, min_depth=min_depth, min_value=min_value)
     writefn(mq0, depths, prefix & "." & target.name & ".mq0.bed", target.name, min_depth=min_depth, min_value=min_value)
-    writefn(inters, depths, prefix & "." & target.name & ".inters.bed", target.name, min_depth=min_depth, min_value=min_value)
-    writefn(frag_depths, depths, prefix & "." & target.name & ".frags.bed", target.name, min_depth=min_depth, min_value=min_value)
+    writefn(misms, depths, prefix & "." & target.name & ".mismatches.bed", target.name, min_depth=min_depth, min_value=min_value)
+    writefn(weirds, depths, prefix & "." & target.name & ".weird.bed", target.name, min_depth=min_depth, min_value=min_value)
+    writefn(inters, depths, prefix & "." & target.name & ".interchromosomals.bed", target.name, min_depth=min_depth, min_value=min_value)
 
     GC_fullCollect()
+    break
 
 
 var progs = {
