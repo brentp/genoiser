@@ -59,9 +59,10 @@ type
     values*: seq[int32]
     f*: proc(aln:Record, posns:var seq[mrange])
 
-proc mosfun*(bam: Bam, funs: seq[Fun], chrom: string, start:int, stop:int) =
+proc mosfun*(bam: Bam, funs: seq[Fun], chrom: string, start:int, stop:int): bool =
   ## for the chromosome given, call each f in fs if skip_fun returns false and return
   ## an array for each function in fs.
+  result = false
 
   var tid: int = -1
   var tlen = -1
@@ -92,12 +93,13 @@ proc mosfun*(bam: Bam, funs: seq[Fun], chrom: string, start:int, stop:int) =
           continue
         if se_stop >= f.values.len:
           se_stop = f.values.len - 1
-
+        result = true
         f.values[se_start] += int32(se.count)
         f.values[se_stop] -= int32(se.count)
 
-  for f in funs:
-    accumulater(f.values)
+  if result:
+    for f in funs:
+      accumulater(f.values)
 
 proc softfun*(aln:Record, posns:var seq[mrange]) =
   ## softfun an example of a `fun` that can be sent to `mosfun`.
@@ -447,13 +449,7 @@ Options:
   for target in b.hdr.targets:
 
     # NOTE: fragile. make sure these are same orders as fns array above.
-    var fhs = [
-      myopen(prefix & "." & target.name & ".soft.bed"),
-      myopen(prefix & "." & target.name & ".mq0.bed"),
-      myopen(prefix & "." & target.name & ".weird.bed"),
-      myopen(prefix & "." & target.name & ".mismatches.bed"),
-      myopen(prefix & "." & target.name & ".interchromosomal.bed"),
-    ]
+    var fhs: seq[File]
 
     stderr.write_line target.name
     var start = 0
@@ -465,16 +461,25 @@ Options:
           echo "resizing"
         for f in fns:
           f.values.set_len(stop - start + 1)
-      for f in fns:
-        zeroMem(f.values[0].addr.pointer, f.values.len * sizeof(f.values[0]))
+          zeroMem(f.values[0].addr.pointer, f.values.len * sizeof(f.values[0]))
 
-      mosfun(b, fns, target.name, start, stop)
+      if mosfun(b, fns, target.name, start, stop):
+        if fhs == nil:
+          fhs = @[
+            myopen(prefix & "." & target.name & ".soft.bed"),
+            myopen(prefix & "." & target.name & ".mq0.bed"),
+            myopen(prefix & "." & target.name & ".weird.bed"),
+            myopen(prefix & "." & target.name & ".mismatches.bed"),
+            myopen(prefix & "." & target.name & ".interchromosomal.bed"),
+          ]
 
-      writefn(softs, depths, fhs[0], target.name, start, min_depth=min_depth, min_value=min_value)
-      writefn(mq0, depths, fhs[1], target.name, start, min_depth=min_depth, min_value=min_value)
-      writefn(misms, depths, fhs[2], target.name, start, min_depth=min_depth, min_value=min_value)
-      writefn(weirds, depths, fhs[3], target.name, start, min_depth=min_depth, min_value=min_value)
-      writefn(inters, depths, fhs[4], target.name, start, min_depth=min_depth, min_value=min_value)
+        writefn(softs, depths, fhs[0], target.name, start, min_depth=min_depth, min_value=min_value)
+        writefn(mq0, depths, fhs[1], target.name, start, min_depth=min_depth, min_value=min_value)
+        writefn(misms, depths, fhs[2], target.name, start, min_depth=min_depth, min_value=min_value)
+        writefn(weirds, depths, fhs[3], target.name, start, min_depth=min_depth, min_value=min_value)
+        writefn(inters, depths, fhs[4], target.name, start, min_depth=min_depth, min_value=min_value)
+        for f in fns:
+          zeroMem(f.values[0].addr.pointer, f.values.len * sizeof(f.values[0]))
 
       start += L
 
