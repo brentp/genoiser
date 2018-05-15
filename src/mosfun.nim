@@ -437,7 +437,7 @@ Options:
   if b.idx == nil:
     quit "coudn't open bam index for " & fbam
 
-  var L = 8000000
+  var L = 5000000
   var depths = Fun(values:new_seq[int32](L+1), f:depthfun)
   var softs = Fun(values:new_seq[int32](L+1), f:softfun)
   var mq0 = Fun(values:new_seq[int32](L+1), f:mq0fun)
@@ -475,8 +475,8 @@ Options:
 
         writefn(softs, depths, fhs[0], target.name, start, min_depth=min_depth, min_value=min_value)
         writefn(mq0, depths, fhs[1], target.name, start, min_depth=min_depth, min_value=min_value)
-        writefn(misms, depths, fhs[2], target.name, start, min_depth=min_depth, min_value=min_value)
-        writefn(weirds, depths, fhs[3], target.name, start, min_depth=min_depth, min_value=min_value)
+        writefn(weirds, depths, fhs[2], target.name, start, min_depth=min_depth, min_value=min_value)
+        writefn(misms, depths, fhs[3], target.name, start, min_depth=min_depth, min_value=min_value)
         writefn(inters, depths, fhs[4], target.name, start, min_depth=min_depth, min_value=min_value)
         for f in fns:
           zeroMem(f.values[0].addr.pointer, f.values.len * sizeof(f.values[0]))
