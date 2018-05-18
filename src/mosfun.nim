@@ -37,6 +37,18 @@ proc accumulater[T](c: var seq[T]) =
     tracker += v
     c[i] = tracker
 
+iterator ranges*[T](counts: var seq[T], chrom:string): mchrom {.inline.} =
+  var last_count = counts[0]
+  var last_i = 0
+  for i, c in counts:
+    if last_count != c:
+      if last_count != 0:
+        yield mchrom(chrom:chrom, start:last_i, stop:i, count:last_count.int)
+      last_i = i
+      last_count = c
+  if last_count != 0:
+    yield mchrom(chrom:chrom, start:last_i, stop:counts.len, count:last_count)
+
 iterator mranges*[T](depth: var seq[T], values: var seq[T]): mpair {.inline.} =
   ## merge intervals+values where consecutive values and depths are unchanged
   if len(depth) != len(values):
@@ -171,87 +183,30 @@ proc read_line(hf: ptr htsFile, kstr: ptr kstring_t, check_ok: proc(depth:int, v
       return iv
   return nil
 
-
-iterator genstream(fns: seq[string], sample_checker: proc(depth:int, value:int): bool): crange =
-  ## merge all files into a single sorted stream of intervals (after filtering by sample_checker).
-  var kstr : kstring_t
-  kstr.l = 0
-  var fhs = new_seq[ptr htsFile](len(fns))
-  var q = newHeap[crange]() do (a, b: crange) -> int:
-    a.start - b.start
-
-  for i, fn in fns:
-    fhs[i] = hts_open(fn.cstring, "r")
-    var v = read_line(fhs[i], kstr.addr, sample_checker, i)
-    if v != nil:
-      q.push(v)
-
-  while q.size != 0:
-    # pop the leftest interval.
-    var left = q.pop
-    yield left
-    var v = read_line(fhs[left.idx], kstr.addr, sample_checker, left.idx)
-    if v != nil:
-      q.push(v)
-
-proc merge_pop(heap: var Heap[cend]): cend {.inline.} =
-  ## if pop off the heap until we get a novel position. this
-  ## makes sure we don't yield multiple identical positions from
-  ## gense
-  result = heap.pop
-  while heap.size > 0 and heap.peek.pos == result.pos:
-    var tmp = heap.pop
-    result.upd += tmp.upd
-
-iterator gense(fns: seq[string], sample_checker: proc(depth:int, value:int): bool): cend =
-  ## convert start, end into position with incrment of +1 for start, -1 for end.
-  var heap = newHeap[cend]() do (a, b: cend) -> int:
-    a.pos - b.pos
-
-  for iv in genstream(fns, sample_checker):
-    # start is +1, end is -1, can yield a start once the end is passed.
-    while heap.size > 0 and heap.peek.pos < iv.start:
-      yield heap.merge_pop
-    heap.push(cend(chrom:iv.chrom, pos:iv.start, upd:1))
-
-    #while heap.size > 0 and heap.peek.pos < iv.stop:
-    #  yield heap.pop
-    var cc = cend(chrom:iv.chrom, pos:iv.stop, upd:(-1))
-    heap.push(cc)
-
-  while heap.size > 0:
-    yield heap.merge_pop
-
-iterator aggregator0*(fns: seq[string], sample_checker: proc(depth:int, value:int): bool): mchrom =
-  # 1. creating a single merged, sorted stream of intervals from all files
-  # 2. push start (+1) and end (-1) onto a queue.
-  # 3. for each start added to queue. we can pop all items in the heap positioned below it.
-  # 4. track cumulative sum of +1 and -1
-  var 
-    count = 0
-    last_pos = 0
-
-  for iv in gense(fns, sample_checker):
-    yield mchrom(chrom:iv.chrom, start:last_pos, stop:iv.pos, count:count)
-    last_pos = iv.pos
-    count += iv.upd
-
 iterator aggregator*(fns: seq[string], sample_checker: proc(depth:int, value:int): bool): mchrom =
-  var 
-    last:mchrom
+  var a = new_seq[int32](100000000)
+  var kstr = kstring_t(l:0, m:0, s:nil)
+  var chrom: string
 
-  for m in aggregator0(fns, sample_checker):
-    # extend last interval
-    if last == nil:
-      last = m
-      continue
-    if m.count == last.count and m.start == last.stop:
-      last.stop = m.stop
-    else:
-      yield last
-      last = mchrom(chrom:m.chrom, start:m.start, stop:m.stop, count:m.count)
-
-  yield last
+  for i, f in fns:
+    if i > 0 and i mod 100 == 0:
+      stderr.write_line "on file " & $i & " of " & $fns.len
+    var fh = hts_open(f.cstring, "r")
+    var v = read_line(fh, kstr.addr, sample_checker, 0)
+    chrom = v.chrom
+    while v != nil:
+      if v.stop >= a.len:
+        var old_len = a.len
+        #stderr.write_line "old_len:" & $old_len & " new len:" & $int(v.stop.float * 1.33)
+        a.set_len(int(v.stop.float * 1.33))
+        zeroMem(a[old_len].addr, sizeof(a[0]) * (a.len - old_len))
+      a[v.start].inc
+      a[v.stop].dec
+      v = read_line(fh, kstr.addr, sample_checker, 0)
+    discard hts_close(fh)
+  accumulater(a)
+  for m in ranges(a, chrom):
+    yield m
 
 proc refposns(aln:Record, posns:var seq[mrange]) {.inline.} =
   var c = aln.cigar
@@ -408,7 +363,7 @@ proc per_sample_main(argv: seq[string]) =
 
 Arguments:
 
-  <BED>          output path prefix
+  <PREFIX>       output path prefix
   <BAM-or-CRAM>  the alignment file.
 
 Options:
@@ -448,7 +403,6 @@ Options:
 
   for target in b.hdr.targets:
 
-    # NOTE: fragile. make sure these are same orders as fns array above.
     var fhs: seq[File]
 
     stderr.write_line target.name
@@ -466,11 +420,12 @@ Options:
       if mosfun(b, fns, target.name, start, stop):
         if fhs == nil:
           fhs = @[
-            myopen(prefix & "." & target.name & ".soft.bed"),
-            myopen(prefix & "." & target.name & ".mq0.bed"),
-            myopen(prefix & "." & target.name & ".weird.bed"),
-            myopen(prefix & "." & target.name & ".mismatches.bed"),
-            myopen(prefix & "." & target.name & ".interchromosomal.bed"),
+            # NOTE: fragile. make sure these are same orders as fns array above.
+            myopen(prefix & ".mosfun." & target.name & ".soft.bed"),
+            myopen(prefix & ".mosfun." & target.name & ".mq0.bed"),
+            myopen(prefix & ".mosfun." & target.name & ".weird.bed"),
+            myopen(prefix & ".mosfun." & target.name & ".mismatches.bed"),
+            myopen(prefix & ".mosfun." & target.name & ".interchromosomal.bed"),
           ]
 
         writefn(softs, depths, fhs[0], target.name, start, min_depth=min_depth, min_value=min_value)
