@@ -183,27 +183,52 @@ proc read_line(hf: ptr htsFile, kstr: ptr kstring_t, check_ok: proc(depth:int, v
       return iv
   return nil
 
-iterator aggregator*(fns: seq[string], sample_checker: proc(depth:int, value:int): bool): mchrom =
-  var a = new_seq[int32](100000000)
+type sample_count {.shallow.} = ref object
+  arr:seq[int8]
+  chrom:string
+
+
+proc sample_binary(f: string, sample_checker: proc(depth:int, value:int): bool, fai:Fai): sample_count =
+
   var kstr = kstring_t(l:0, m:0, s:nil)
-  var chrom: string
+
+  var fh = hts_open(f.cstring, "r")
+  var v = read_line(fh, kstr.addr, sample_checker, 0)
+  result = sample_count(chrom:v.chrom, arr:new_seq[int8](fai.chrom_len(v.chrom) + 1))
+  while v != nil:
+    when defined(debug):
+      if v.stop >= result.arr.len:
+        quit "got stop > chromosome length"
+    result.arr[v.start].inc
+    result.arr[v.stop].dec
+    v = read_line(fh, kstr.addr, sample_checker, 0)
+  discard hts_close(fh)
+
+
+iterator aggregator*(fns: seq[string], sample_checker: func(depth:int, value:int): bool, fai:Fai): mchrom =
+  var a: seq[int32]
+  var chrom: string = ""
 
   for i, f in fns:
     if i > 0 and i mod 100 == 0:
       stderr.write_line "on file " & $i & " of " & $fns.len
-    var fh = hts_open(f.cstring, "r")
-    var v = read_line(fh, kstr.addr, sample_checker, 0)
-    chrom = v.chrom
-    while v != nil:
-      if v.stop >= a.len:
-        var old_len = a.len
-        #stderr.write_line "old_len:" & $old_len & " new len:" & $int(v.stop.float * 1.33)
-        a.set_len(int(v.stop.float * 1.33))
-        zeroMem(a[old_len].addr, sizeof(a[0]) * (a.len - old_len))
-      a[v.start].inc
-      a[v.stop].dec
-      v = read_line(fh, kstr.addr, sample_checker, 0)
-    discard hts_close(fh)
+    var t = sample_binary(f, sample_checker, fai)
+    shallow(t.arr)
+    if chrom != "" and chrom != t.chrom:
+      quit "got different chroms"
+    if chrom == "":
+      chrom = t.chrom
+      a = newSeq[int32](fai.chrom_len(chrom) + 1)
+    else:
+      if t.arr.len != a.len:
+        quit "different length chromosomes. only send in files from same chrom."
+    for i, v in t.arr:
+      # we know the values should not overlap.
+      when defined(debug):
+        if not (v == -1 or v == 0 or v == 1): quit "got unexpected value at:" & $i & " of " & $v
+      if v != 0:
+        a[i] += v.int32
+
   accumulater(a)
   for m in ranges(a, chrom):
     yield m
@@ -315,8 +340,8 @@ Arguments:
   <per-sample-output>          the txt output from mosfun per-sample
 
 Options:
+  -f --fasta <reference>        indexed fasta reference file required to get chromosome lengths.
   -e --expr <string>            per-sample filtering expression [default: "(value > 0) & ((value / depth) > 0.1)"]
-  -z --zero                     output zero values.
   -h --help                     show help
   """)
 
@@ -324,12 +349,17 @@ Options:
 
   var expr:string = ($args["--expr"]).strip(chars={'"'})
 
+  var fai:Fai
+  if $args["--fasta"] == "nil":
+    quit "--fasta is required"
+  if not open(fai, $args["--fasta"]):
+    quit "invalid --fasta: " & $args["--fasta"]
+
   var ex = expression(expr)
   if ex.error() != 0:
     quit "error with expression"
   var vc = "value".cstring
   var dc = "depth".cstring
-  var zeros = args["--zero"] == true # force boolean
 
   proc sample_ok(depth:int, value:int): bool =
     discard ke_set_int(ex.ke, vc, value)
@@ -339,8 +369,8 @@ Options:
       quit format("expresion error with value:$# depth:$#", value, depth)
 
 
-  for iv in aggregator(@(args["<per-sample-output>"]), sample_ok):
-    if iv.count == 0 and not zeros: continue
+  for iv in aggregator(@(args["<per-sample-output>"]), sample_ok, fai):
+    if iv.count == 0: continue
     stdout.write_line iv.chrom & "\t" & intToStr(iv.start) & "\t" & intToStr(iv.stop) & "\t" & intToStr(iv.count)
 
 proc writefn(a:Fun, depths:Fun, fh:File, chrom:string, start:int, min_depth:int=0, min_value:int=1) =

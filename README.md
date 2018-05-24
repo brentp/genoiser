@@ -55,3 +55,7 @@ proc softfun*(aln:Record, posns:var seq[mrange]) =
 
 This library provides the machinery. Other command-line tools will use this for more obviously useful things.
 
+
+## Speed
+
+for maximum speed, compile with `nim c -d:release --passC:-flto --passL:-s --gc:markAndSweep src/mosfun.nim`
