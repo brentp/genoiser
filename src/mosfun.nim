@@ -1,3 +1,5 @@
+{.experimental.}
+
 import hts
 import math
 import os
@@ -7,6 +9,7 @@ import sequtils
 import strutils
 import algorithm
 import binaryheap
+import threadpool
 import kexpr
 
 type 
@@ -153,7 +156,7 @@ proc eventfun*(aln:Record, posns:var seq[mrange]) =
     if op.consumes.reference:
       pos += op.len
 
-proc read_line(hf: ptr htsFile, kstr: ptr kstring_t, check_ok: proc(depth:int, value:int):bool, idx:int): crange {.inline.} =
+proc read_line(hf: ptr htsFile, kstr: ptr kstring_t, check_ok: proc(depth:int, value:int):bool, idx:int): crange {.inline, gcsafe.} =
   
   var iv = crange(idx:idx)
   while true:
@@ -188,49 +191,109 @@ type sample_count {.shallow.} = ref object
   chrom:string
 
 
-proc sample_binary(f: string, sample_checker: proc(depth:int, value:int): bool, fai:Fai): sample_count =
+proc get_chrom_len(f:string, fai:Fai): int =
+  var fh = hts_open(f.cstring, "r")
+  var kstr = kstring_t(l:0, m:0, s:nil)
+  proc sample_ok(depth:int, value:int): bool = true
+
+  var v = read_line(fh, kstr.addr, sample_ok, 0)
+  discard hts_close(fh)
+  return fai.chrom_len(v.chrom)
+
+
+proc sample_binary(f: string, sample_checker: string, chrom_len:int, s: ptr sample_count): bool {.gcsafe.}=
+
+  var sc = s[]
+  if sc == nil:
+    sc = sample_count()
+  if sc.arr == nil or sc.arr.len != chrom_len + 1:
+    #stderr.write_line "setting new length"
+    sc.arr = newSeq[int8](chrom_len+1)
+  else:
+    #stderr.write_line "re-using:" & f
+    zeroMem(sc.arr[0].addr, sizeof(sc.arr[0]) * sc.arr.len)
 
   var kstr = kstring_t(l:0, m:0, s:nil)
+  var ex = expression(sample_checker)
+  if ex.error() != 0:
+    quit "error with expression"
+  var vc = "value".cstring
+  var dc = "depth".cstring
+
+  proc sample_ok(depth:int, value:int): bool =
+    discard ke_set_int(ex.ke, vc, value)
+    discard ke_set_int(ex.ke, dc, depth)
+    result = ex.get_bool()
+    if ex.error() != 0:
+      quit format("expresion error with value:$# depth:$#", value, depth)
 
   var fh = hts_open(f.cstring, "r")
-  var v = read_line(fh, kstr.addr, sample_checker, 0)
-  result = sample_count(chrom:v.chrom, arr:new_seq[int8](fai.chrom_len(v.chrom) + 1))
+  var v = read_line(fh, kstr.addr, sample_ok, 0)
+  sc.chrom = $v.chrom
   while v != nil:
     when defined(debug):
-      if v.stop >= result.arr.len:
+      if sc == nil or sc.arr == nil:
+        stderr.write_line "sc nil"
+      if v == nil:
+        stderr.write_line "v nil"
+
+      if v.stop >= sc.arr.len:
         quit "got stop > chromosome length"
-    result.arr[v.start].inc
-    result.arr[v.stop].dec
-    v = read_line(fh, kstr.addr, sample_checker, 0)
+    sc.arr[v.start].inc
+    sc.arr[v.stop].dec
+    v = read_line(fh, kstr.addr, sample_ok, 0)
   discard hts_close(fh)
+  s[] = sc
+  result = true
 
 
-iterator aggregator*(fns: seq[string], sample_checker: func(depth:int, value:int): bool, fai:Fai): mchrom =
+iterator aggregator*(fns: seq[string], sample_checker: string, fai:Fai): mchrom =
   var a: seq[int32]
   var chrom: string = ""
+  var threads = min(20, len(fns))
 
-  for i, f in fns:
-    if i > 0 and i mod 100 == 0:
-      stderr.write_line "on file " & $i & " of " & $fns.len
-    var t = sample_binary(f, sample_checker, fai)
-    shallow(t.arr)
-    if chrom != "" and chrom != t.chrom:
-      quit "got different chroms"
+  var chrom_len = get_chrom_len(fns[0], fai)
+  var responses = newSeq[FlowVarBase](min(threads, fns.len))
+  var results = newSeq[sample_count](min(threads, fns.len))
+  var accumulated = newSeq[int32](chrom_len + 1)
+
+  for j in 0..min(responses.len, results.len) - 1:
+    responses[j] = spawn sample_binary(fns[j], sample_checker, chrom_len, results[j].addr)
+
+  var jobi = responses.len
+
+  while results.len != 0:
+
+    var index = awaitAny(responses)
+    if index == -1:
+      quit "got unexpected value from await"
+
+    when defined(debug):
+      stderr.write_line "received:", $index
+    var sc = results[index]
+    if sc == nil:
+      quit "WTF"
     if chrom == "":
-      chrom = t.chrom
-      a = newSeq[int32](fai.chrom_len(chrom) + 1)
-    else:
-      if t.arr.len != a.len:
-        quit "different length chromosomes. only send in files from same chrom."
-    for i, v in t.arr:
+      chrom = sc.chrom
+    elif chrom != sc.chrom:
+        quit "expected all files from same chromosome, got:'" & chrom & "' and '" & sc.chrom & "'"
+    for pos, v in sc.arr:
       # we know the values should not overlap.
       when defined(debug):
-        if not (v == -1 or v == 0 or v == 1): quit "got unexpected value at:" & $i & " of " & $v
-      if v != 0:
-        a[i] += v.int32
+        if not (v == -1 or v == 0 or v == 1): quit "got unexpected value at:" & $pos & " of " & $v
+      accumulated[pos] += v.int32
 
-  accumulater(a)
-  for m in ranges(a, chrom):
+    if jobi < fns.len:
+      responses[index] = spawn sample_binary(fns[jobi], sample_checker, chrom_len, results[index].addr)
+    else:
+      results.del(index)
+      responses.del(index)
+    jobi += 1
+    if jobi mod 100 == 0:
+      stderr.write_line $jobi
+
+  accumulater(accumulated)
+  for m in ranges(accumulated, chrom):
     yield m
 
 proc refposns(aln:Record, posns:var seq[mrange]) {.inline.} =
@@ -358,18 +421,8 @@ Options:
   var ex = expression(expr)
   if ex.error() != 0:
     quit "error with expression"
-  var vc = "value".cstring
-  var dc = "depth".cstring
 
-  proc sample_ok(depth:int, value:int): bool =
-    discard ke_set_int(ex.ke, vc, value)
-    discard ke_set_int(ex.ke, dc, depth)
-    result = ex.get_bool()
-    if ex.error() != 0:
-      quit format("expresion error with value:$# depth:$#", value, depth)
-
-
-  for iv in aggregator(@(args["<per-sample-output>"]), sample_ok, fai):
+  for iv in aggregator(@(args["<per-sample-output>"]), expr, fai):
     if iv.count == 0: continue
     stdout.write_line iv.chrom & "\t" & intToStr(iv.start) & "\t" & intToStr(iv.stop) & "\t" & intToStr(iv.count)
 
