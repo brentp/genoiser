@@ -20,18 +20,12 @@ type
       stop:int
       count: int
   mpair* = tuple[start:int, stop:int, depth: int, value:int]
-  crange* = ref object
+  crange* = object
     chrom:string
     start:int
     stop:int
     ## index of the file
     idx:int
-  cend* = ref object
-    chrom:string
-    pos:int
-    ## up (1) or down(-1)
-    upd: int
-    ## index of the file
 
 proc accumulater[T](c: var seq[T]) =
   # convert from an array of start/end inc/decs to actual coverage.
@@ -50,7 +44,7 @@ iterator ranges*[T](counts: var seq[T], chrom:string): mchrom {.inline.} =
       last_i = i
       last_count = c
   if last_count != 0:
-    yield mchrom(chrom:chrom, start:last_i, stop:counts.len, count:last_count)
+    yield mchrom(chrom:chrom, start:last_i, stop:counts.len, count:last_count.int)
 
 iterator mranges*[T](depth: var seq[T], values: var seq[T]): mpair {.inline.} =
   ## merge intervals+values where consecutive values and depths are unchanged
@@ -156,12 +150,12 @@ proc eventfun*(aln:Record, posns:var seq[mrange]) =
     if op.consumes.reference:
       pos += op.len
 
-proc read_line(hf: ptr htsFile, kstr: ptr kstring_t, check_ok: proc(depth:int, value:int):bool, idx:int): crange {.inline, gcsafe.} =
+proc read_line(hf: ptr htsFile, kstr: ptr kstring_t, check_ok: proc(depth:int, value:int):bool, idx:int): crange {.inline, thread.} =
   
   var iv = crange(idx:idx)
   while true:
     if hts_getline(hf, cint(10), kstr) <= 0:
-      return nil
+      return crange(idx:idx)
 
     var
       i = 0
@@ -184,38 +178,35 @@ proc read_line(hf: ptr htsFile, kstr: ptr kstring_t, check_ok: proc(depth:int, v
 
     if check_ok(depth, value):
       return iv
-  return nil
+  return crange(idx:idx)
 
-type sample_count {.shallow.} = ref object
+type sample_count {.shallow.} = object
   arr:seq[int8]
   chrom:string
 
-
-proc get_chrom_len(f:string, fai:Fai): int =
+proc get_chrom_len(f:string, fai:Fai): tuple[chrom:string, length:int] =
   var fh = hts_open(f.cstring, "r")
   var kstr = kstring_t(l:0, m:0, s:nil)
   proc sample_ok(depth:int, value:int): bool = true
 
   var v = read_line(fh, kstr.addr, sample_ok, 0)
   discard hts_close(fh)
-  return fai.chrom_len(v.chrom)
+  return (v.chrom, fai.chrom_len(v.chrom))
 
 
-proc sample_binary(f: string, sample_checker: string, chrom_len:int, s: ptr sample_count): bool {.gcsafe.}=
+proc sample_binary(fs: seq[string], sample_checker: string, chrom_len:int, s: ptr sample_count): bool {.thread.}=
 
   var sc = s[]
-  if sc == nil:
-    sc = sample_count()
+
   if sc.arr == nil or sc.arr.len != chrom_len + 1:
-    #stderr.write_line "setting new length"
-    sc.arr = newSeq[int8](chrom_len+1)
+    stderr.write_line "error: cant set new length"
+    quit 2
   else:
-    #stderr.write_line "re-using:" & f
     zeroMem(sc.arr[0].addr, sizeof(sc.arr[0]) * sc.arr.len)
 
-  var kstr = kstring_t(l:0, m:0, s:nil)
   var ex = expression(sample_checker)
   if ex.error() != 0:
+    stderr.write_line "error: with expression"
     quit "error with expression"
   var vc = "value".cstring
   var dc = "depth".cstring
@@ -226,39 +217,51 @@ proc sample_binary(f: string, sample_checker: string, chrom_len:int, s: ptr samp
     result = ex.get_bool()
     if ex.error() != 0:
       quit format("expresion error with value:$# depth:$#", value, depth)
+  var kstr = kstring_t(l:0, m:0, s:nil)
+  # TODO: see why 48119899 is showing up in output.
 
-  var fh = hts_open(f.cstring, "r")
-  var v = read_line(fh, kstr.addr, sample_ok, 0)
-  sc.chrom = $v.chrom
-  while v != nil:
-    when defined(debug):
-      if sc == nil or sc.arr == nil:
-        stderr.write_line "sc nil"
-      if v == nil:
-        stderr.write_line "v nil"
+  for f in fs:
+    var fh = hts_open(f.cstring, "r")
+    var v = read_line(fh, kstr.addr, sample_ok, 0)
+    if sc.chrom != v.chrom:
+      quit "got different chromosome values:" & sc.chrom & ", " & v.chrom
+    while v.stop != 0:
+      when defined(debug):
+        if sc.arr == nil:
+          stderr.write_line "sc nil"
 
-      if v.stop >= sc.arr.len:
-        quit "got stop > chromosome length"
-    sc.arr[v.start].inc
-    sc.arr[v.stop].dec
-    v = read_line(fh, kstr.addr, sample_ok, 0)
-  discard hts_close(fh)
+        if v.stop >= sc.arr.len:
+          quit "got stop > chromosome length"
+      sc.arr[v.start].inc
+      sc.arr[v.stop].dec
+      v = read_line(fh, kstr.addr, sample_ok, 0)
+    discard hts_close(fh)
+
   s[] = sc
   result = true
 
 
-iterator aggregator*(fns: seq[string], sample_checker: string, fai:Fai): mchrom =
+iterator aggregator*(fns: seq[string], sample_checker: string, fai:Fai, nthreads:int): mchrom =
   var a: seq[int32]
-  var chrom: string = ""
-  var threads = min(20, len(fns))
+  var threads = min(nthreads, len(fns))
 
-  var chrom_len = get_chrom_len(fns[0], fai)
+  var (chrom, chrom_len) = get_chrom_len(fns[0], fai)
   var responses = newSeq[FlowVarBase](min(threads, fns.len))
   var results = newSeq[sample_count](min(threads, fns.len))
   var accumulated = newSeq[int32](chrom_len + 1)
 
+  var batch_size = 16
+
+  if batch_size * threads > len(fns):
+    batch_size = int(len(fns) / threads)
+  if batch_size > 127:
+    batch_size = 127
+
   for j in 0..min(responses.len, results.len) - 1:
-    responses[j] = spawn sample_binary(fns[j], sample_checker, chrom_len, results[j].addr)
+    results[j].arr = newSeq[int8](chrom_len+1)
+    results[j].chrom = chrom
+    #stderr.write_line join(fns[j*batch_size..((j + 1) * batch_size - 1)], "\n")
+    responses[j] = spawn sample_binary(fns[j*batch_size..((j + 1) * batch_size - 1)], sample_checker, chrom_len, results[j].addr)
 
   var jobi = responses.len
 
@@ -268,11 +271,7 @@ iterator aggregator*(fns: seq[string], sample_checker: string, fai:Fai): mchrom 
     if index == -1:
       quit "got unexpected value from await"
 
-    when defined(debug):
-      stderr.write_line "received:", $index
     var sc = results[index]
-    if sc == nil:
-      quit "WTF"
     if chrom == "":
       chrom = sc.chrom
     elif chrom != sc.chrom:
@@ -280,14 +279,18 @@ iterator aggregator*(fns: seq[string], sample_checker: string, fai:Fai): mchrom 
     for pos, v in sc.arr:
       # we know the values should not overlap.
       when defined(debug):
-        if not (v == -1 or v == 0 or v == 1): quit "got unexpected value at:" & $pos & " of " & $v
+        if v < -batch_size or v > batch_size: quit "got unexpected value at:" & $pos & " of " & $v
       accumulated[pos] += v.int32
 
-    if jobi < fns.len:
-      responses[index] = spawn sample_binary(fns[jobi], sample_checker, chrom_len, results[index].addr)
+    if (jobi * batch_size) < fns.len:
+      var imin = jobi * batch_size
+      var imax = min(fns.len - 1, (jobi + 1) * batch_size - 1)
+      #stderr.write_line join(fns[imin..imax], "\n")
+      responses[index] = spawn sample_binary(fns[imin..imax], sample_checker, chrom_len, results[index].addr)
     else:
       results.del(index)
       responses.del(index)
+
     jobi += 1
     if jobi mod 100 == 0:
       stderr.write_line $jobi
@@ -404,11 +407,13 @@ Arguments:
 
 Options:
   -f --fasta <reference>        indexed fasta reference file required to get chromosome lengths.
+  -t --threads <threads>        number of processors to use for parallelization. [default: 12]
   -e --expr <string>            per-sample filtering expression [default: "(value > 0) & ((value / depth) > 0.1)"]
   -h --help                     show help
   """)
 
   let args = docopt(doc, argv=argv)
+  #GC_disableMarkAndSweep()
 
   var expr:string = ($args["--expr"]).strip(chars={'"'})
 
@@ -418,11 +423,13 @@ Options:
   if not open(fai, $args["--fasta"]):
     quit "invalid --fasta: " & $args["--fasta"]
 
+  var threads = parseInt($args["--threads"])
+
   var ex = expression(expr)
   if ex.error() != 0:
     quit "error with expression"
 
-  for iv in aggregator(@(args["<per-sample-output>"]), expr, fai):
+  for iv in aggregator(@(args["<per-sample-output>"]), expr, fai, threads):
     if iv.count == 0: continue
     stdout.write_line iv.chrom & "\t" & intToStr(iv.start) & "\t" & intToStr(iv.stop) & "\t" & intToStr(iv.count)
 
