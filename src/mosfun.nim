@@ -8,7 +8,6 @@ import docopt
 import sequtils
 import strutils
 import algorithm
-import binaryheap
 import threadpool
 import kexpr
 
