@@ -547,7 +547,7 @@ var helps = {
    "aggregate": "aggregate many sample outputs of per-sample into single file"
 }.toTable
 
-const version = "0.0.2"
+const version = "0.2.0"
 
 proc main() =
 
