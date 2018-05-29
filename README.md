@@ -59,3 +59,46 @@ This library provides the machinery. Other command-line tools will use this for 
 ## Speed
 
 for maximum speed, compile with `nim c -d:release --passC:-flto --passL:-s --gc:markAndSweep src/mosfun.nim`
+
+## CLI
+
+The command-line interface allows running pre-specified noise filters in 2 steps. The first steps calculates the "noise" in each sample.
+
+```
+mosfun per-sample mosfun per-sample --fasta $reference results/$sample /path/to/$sample.bam # or cram
+```
+
+This will use a single thread and it will take about 1 hour for 30X bams and a bit more for crams. It will output 5 files per sample.
+at the specificied prefix, in this case, `results/$sample`
+
+After all samples have been run, then the user can `aggregate` the signal across samples. The recommended commands are:
+
+```
+chroms="$(seq 1 22) X Y"
+
+# count number of samples at each site where 10 or more reads read with 4 or more mismatches overlapped.
+echo $chroms | tr ' ' '\n' \
+    | gargs -d -v -p 22 "mosfun aggregate -e 'value > 10' results/*.mosfun.{}.mismatches.bed > mismatches.{}.bed"
+
+# count number of samples at each site where more than 1 and less than 15% of reads were interchromosomal.
+echo $chroms | tr ' ' '\n' \
+    | gargs -d -v -p 22 "mosfun aggregate -e '(value / depth) < 0.15 & (value > 1)' results/*.mosfun.{}.interchromosomal.bed > interchromosomal.{}.bed"
+
+# count number of samples at each site where more than 1 and less than 15% of reads were weird.
+echo $chroms | tr ' ' '\n' \
+    | gargs -d -v -p 22 "mosfun aggregate -e '(value / depth) < 0.15 & (value > 1)' results/*.mosfun.{}.weird.bed > weird.{}.bed"
+
+# count number of samples at each site where more than 1 and less than 15% of reads were soft-clipped.
+echo $chroms | tr ' ' '\n' \
+    | gargs -d -v -p 22 "mosfun aggregate -e '(value / depth) < 0.15 & (value > 1)' results/*.mosfun.{}.soft.bed > soft.{}.bed"
+
+# count number of samples at each site where more than 2 where soft-clipped.
+echo $chroms | tr ' ' '\n' \
+    | gargs -d -v -p 22 "mosfun aggregate -e '(value > 2)' results/*.mosfun.{}.soft.bed > high-soft.{}.bed"
+
+```
+where `gargs` is available as a static binary from [here](https://github.com/brentp/gargs/releases)
+
+This will output 1 file per chromosome, per metric. The resulting files are the desired output.
+
+
