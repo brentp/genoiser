@@ -27,7 +27,7 @@ type
     ## index of the file
     idx:int
 
-proc accumulater[T](c: var seq[T]) =
+proc cumulative_sum[T](c: var seq[T]) =
   # convert from an array of start/end inc/decs to actual coverage.
   var tracker = T(0)
   for i, v in pairs(c):
@@ -108,7 +108,7 @@ proc mosfun*(bam: Bam, funs: seq[Fun], chrom: string, start:int, stop:int): bool
 
   if result:
     for f in funs:
-      accumulater(f.values)
+      cumulative_sum(f.values)
 
 proc softfun*(aln:Record, posns:var seq[mrange]) =
   ## softfun an example of a `fun` that can be sent to `mosfun`.
@@ -194,8 +194,10 @@ proc get_chrom_len(f:string, fai:Fai): tuple[chrom:string, length:int] =
   return (v.chrom, fai.chrom_len(v.chrom))
 
 
-proc sample_binary(fs: seq[string], sample_checker: string, chrom_len:int, s: ptr sample_count): bool {.thread.}=
-
+proc sample_counter(fs: seq[string], sample_checker: string, chrom_len:int, s: ptr sample_count): bool {.thread.}=
+  ## this is the 'worker' that gets run in parallel. It takes a batch of `fs` files. and updates the s[].arr
+  ## it can not allocate memory related to `s` or the garbage collector could clean it up.
+  ## using batches amortizes the cost of the zeroMem (which is not that high).
   var sc = s[]
 
   if sc.arr == nil or sc.arr.len != chrom_len + 1:
@@ -203,6 +205,10 @@ proc sample_binary(fs: seq[string], sample_checker: string, chrom_len:int, s: pt
     quit 2
   else:
     zeroMem(sc.arr[0].addr, sizeof(sc.arr[0]) * sc.arr.len)
+
+  if len(fs) > 127:
+    stderr.write_line "error: cant batch more thatn 127 samples because of overflow"
+    quit 2
 
   var ex = expression(sample_checker)
   if ex.error() != 0:
@@ -250,7 +256,7 @@ iterator aggregator*(fns: seq[string], sample_checker: string, fai:Fai, nthreads
   var results = newSeq[sample_count](min(threads, fns.len))
   var accumulated = newSeq[int32](chrom_len + 1)
 
-  var batch_size = 16
+  var batch_size = 10
 
   if batch_size * threads > len(fns):
     batch_size = int(len(fns) / threads)
@@ -261,7 +267,7 @@ iterator aggregator*(fns: seq[string], sample_checker: string, fai:Fai, nthreads
     results[j].arr = newSeq[int8](chrom_len+1)
     results[j].chrom = chrom
     #stderr.write_line join(fns[j*batch_size..((j + 1) * batch_size - 1)], "\n")
-    responses[j] = spawn sample_binary(fns[j*batch_size..((j + 1) * batch_size - 1)], sample_checker, chrom_len, results[j].addr)
+    responses[j] = spawn sample_counter(fns[j*batch_size..((j + 1) * batch_size - 1)], sample_checker, chrom_len, results[j].addr)
 
   var jobi = responses.len
 
@@ -286,7 +292,7 @@ iterator aggregator*(fns: seq[string], sample_checker: string, fai:Fai, nthreads
       var imin = jobi * batch_size
       var imax = min(fns.len - 1, (jobi + 1) * batch_size - 1)
       #stderr.write_line join(fns[imin..imax], "\n")
-      responses[index] = spawn sample_binary(fns[imin..imax], sample_checker, chrom_len, results[index].addr)
+      responses[index] = spawn sample_counter(fns[imin..imax], sample_checker, chrom_len, results[index].addr)
     else:
       results.del(index)
       responses.del(index)
@@ -295,7 +301,7 @@ iterator aggregator*(fns: seq[string], sample_checker: string, fai:Fai, nthreads
     if jobi mod 100 == 0:
       stderr.write_line $jobi
 
-  accumulater(accumulated)
+  cumulative_sum(accumulated)
   for m in ranges(accumulated, chrom):
     yield m
 
