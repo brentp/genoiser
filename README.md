@@ -65,7 +65,7 @@ for maximum speed, compile with `nim c -d:release --passC:-flto --passL:-s --gc:
 The command-line interface allows running pre-specified noise filters in 2 steps. The first steps calculates the "noise" in each sample.
 
 ```
-mosfun per-sample mosfun per-sample --fasta $reference results/$sample /path/to/$sample.bam # or cram
+mosfun per-sample --fasta $reference results/$sample /path/to/$sample.bam # or cram
 ```
 
 This will use a single thread and it will take about 1 hour for 30X bams and a bit more for crams. It will output 5 files per sample.
@@ -76,29 +76,60 @@ After all samples have been run, then the user can `aggregate` the signal across
 ```
 chroms="$(seq 1 22) X Y"
 
-# count number of samples at each site where 10 or more reads read with 4 or more mismatches overlapped.
-echo $chroms | tr ' ' '\n' \
-    | gargs -d -v -p 22 "mosfun aggregate -e 'value > 10' results/*.mosfun.{}.mismatches.bed > mismatches.{}.bed"
-
-# count number of samples at each site where more than 1 and less than 15% of reads were interchromosomal.
-echo $chroms | tr ' ' '\n' \
-    | gargs -d -v -p 22 "mosfun aggregate -e '(value / depth) < 0.15 & (value > 1)' results/*.mosfun.{}.interchromosomal.bed > interchromosomal.{}.bed"
-
-# count number of samples at each site where more than 1 and less than 15% of reads were weird.
-echo $chroms | tr ' ' '\n' \
-    | gargs -d -v -p 22 "mosfun aggregate -e '(value / depth) < 0.15 & (value > 1)' results/*.mosfun.{}.weird.bed > weird.{}.bed"
-
+########
+## soft
+########
 # count number of samples at each site where more than 1 and less than 15% of reads were soft-clipped.
 echo $chroms | tr ' ' '\n' \
-    | gargs -d -v -p 22 "mosfun aggregate -e '(value / depth) < 0.15 & (value > 1)' results/*.mosfun.{}.soft.bed > soft.{}.bed"
+    | gargs -d -v -p 5 "mosfun aggregate -t 10 -e '(value / depth) < 0.15 & (value > 1)' results/*.mosfun.{}.soft.bed > soft.{}.bed"
 
 # count number of samples at each site where more than 2 where soft-clipped.
 echo $chroms | tr ' ' '\n' \
-    | gargs -d -v -p 22 "mosfun aggregate -e '(value > 2)' results/*.mosfun.{}.soft.bed > high-soft.{}.bed"
+    | gargs -d -v -p 5 "mosfun aggregate -t 10 -e '(value > 2)' results/*.mosfun.{}.soft.bed > high-soft.{}.bed"
+
+
+###########
+## mq0
+###########
+
+# count number of samples at each site where more than 2 reads had MQ0.
+echo $chroms | tr ' ' '\n' \
+    | gargs -d -v -p 5 "mosfun aggregate -t 10 -e '(value > 2)' results/*.mosfun.{}.mq0.bed > mq0.{}.bed"
+
+
+############
+## weird
+############
+# count number of samples at each site where more than 1 and less than 15% of reads were weird.
+echo $chroms | tr ' ' '\n' \
+    | gargs -d -v -p 5 "mosfun aggregate -t 10 -e '(value / depth) < 0.15 & (value > 1)' results/*.mosfun.{}.weird.bed > weird.{}.bed"
+
+echo $chroms | tr ' ' '\n' \
+    | gargs -d -v -p 5 "mosfun aggregate -t 10 -e '(value > 2)' results/*.mosfun.{}.weird.bed > high-weird.{}.bed"
+
+############
+## mismatches
+############
+
+# count number of samples at each site where 10 or more reads read with 4 or more mismatches overlapped.
+echo $chroms | tr ' ' '\n' \
+    | gargs -d -v -p 5 "mosfun aggregate -t 10 -e 'value > 10' results/*.mosfun.{}.mismatches.bed > mismatches.{}.bed"
+
+
+##################
+# interchromosomal
+##################
+
+# count number of samples at each site where more than 1 and less than 15% of reads were interchromosomal.
+echo $chroms | tr ' ' '\n' \
+    | gargs -d -v -p 5 "mosfun aggregate -t 10 -e '(value / depth) < 0.15 & (value > 1)' results/*.mosfun.{}.interchromosomal.bed > interchromosomal.{}.bed"
+
+echo $chroms | tr ' ' '\n' \
+    | gargs -d -v -p 5 "mosfun aggregate -t 10 -e '(value > 2)' results/*.mosfun.{}.interchromosomal.bed > high-interchromosomal.{}.bed"
 
 ```
 where `gargs` is available as a static binary from [here](https://github.com/brentp/gargs/releases)
 
 This will output 1 file per chromosome, per metric. The resulting files are the desired output.
 
-
+Note that this will use `5*10` threads. Adjust this to match your CPU requirements.
