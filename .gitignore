@@ -1,7 +1,7 @@
 nimcache
 *.bam
 *.bed
-src/mosfun
+src/genoiser
 *.cram
 *.bai
 *.crai
@@ -9,4 +9,4 @@ profile_results.txt
 t.*.bed.gz
 t.*.bed.gz.csi
 tests/all
-tests/mosfun_test
+tests/genoiser_test

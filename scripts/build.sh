@@ -42,7 +42,7 @@ cd docopt.nim
 nimble install -y
 
 cd $base
-git clone --depth 1 git://github.com/brentp/mosfun.git
-cd mosfun
-nim c -d:release --passC:-flto --passL:-s --threads:on src/mosfun.nim
-cp ./src/mosfun /io
+git clone --depth 1 git://github.com/brentp/genoiser.git
+cd genoiser
+nim c -d:release --passC:-flto --passL:-s --threads:on src/genoiser.nim
+cp ./src/genoiser /io

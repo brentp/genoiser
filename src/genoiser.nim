@@ -48,7 +48,7 @@ iterator ranges*[T](counts: var seq[T], chrom:string): mchrom {.inline.} =
 iterator mranges*[T](depth: var seq[T], values: var seq[T]): mpair {.inline.} =
   ## merge intervals+values where consecutive values and depths are unchanged
   if len(depth) != len(values):
-    raise newException(ValueError, "mosfun:expected equal length arrays")
+    raise newException(ValueError, "genoiser:expected equal length arrays")
 
   var last_pair = (depth[0], values[0])
   var last_i = 0
@@ -67,7 +67,7 @@ type
     values*: seq[int32]
     f*: proc(aln:Record, posns:var seq[mrange])
 
-proc mosfun*(bam: Bam, funs: seq[Fun], chrom: string, start:int, stop:int): bool =
+proc genoiser*(bam: Bam, funs: seq[Fun], chrom: string, start:int, stop:int): bool =
   ## for the chromosome given, call each f in fs if skip_fun returns false and return
   ## an array for each function in fs.
   result = false
@@ -110,7 +110,7 @@ proc mosfun*(bam: Bam, funs: seq[Fun], chrom: string, start:int, stop:int): bool
       cumulative_sum(f.values)
 
 proc softfun*(aln:Record, posns:var seq[mrange]) =
-  ## softfun an example of a `fun` that can be sent to `mosfun`.
+  ## softfun an example of a `fun` that can be sent to `genoiser`.
   ## it sets positions where there are soft-clips
   var f = aln.flag
   if f.unmapped or f.secondary or f.supplementary or f.qcfail or f.dup: return
@@ -127,7 +127,7 @@ proc softfun*(aln:Record, posns:var seq[mrange]) =
       pos += op.len
 
 proc eventfun*(aln:Record, posns:var seq[mrange]) =
-  ## eventfun is an example of a `fun` that can be sent to `mosfun`.
+  ## eventfun is an example of a `fun` that can be sent to `genoiser`.
   ## it sets positions where there are soft-clips, hard-clips, insertions, or deletions.
   var f = aln.flag
   if f.unmapped or f.secondary or f.supplementary or f.qcfail or f.dup: return
@@ -322,7 +322,7 @@ proc refposns(aln:Record, posns:var seq[mrange]) {.inline.} =
     pos += olen
 
 proc depthfun*(aln:Record, posns:var seq[mrange]) =
-  ## depthfun is an example of a `fun` that can be sent to `mosfun`.
+  ## depthfun is an example of a `fun` that can be sent to `genoiser`.
   ## it sets reports the depth at each position
   var f = aln.flag
   if f.unmapped or f.secondary or f.qcfail or f.dup: return
@@ -408,7 +408,7 @@ proc aggregate_main(argv: seq[string]) =
 
 Arguments:
 
-  <per-sample-output>          the txt output from mosfun per-sample
+  <per-sample-output>          the txt output from genoiser per-sample
 
 Options:
   -f --fasta <reference>        indexed fasta reference file required to get chromosome lengths.
@@ -512,15 +512,15 @@ Options:
           f.values.set_len(stop - start + 1)
           zeroMem(f.values[0].addr.pointer, f.values.len * sizeof(f.values[0]))
 
-      if mosfun(b, fns, target.name, start, stop):
+      if genoiser(b, fns, target.name, start, stop):
         if fhs == nil:
           fhs = @[
             # NOTE: fragile. make sure these are same orders as fns array above.
-            myopen(prefix & ".mosfun." & target.name & ".soft.bed"),
-            myopen(prefix & ".mosfun." & target.name & ".mq0.bed"),
-            myopen(prefix & ".mosfun." & target.name & ".weird.bed"),
-            myopen(prefix & ".mosfun." & target.name & ".mismatches.bed"),
-            myopen(prefix & ".mosfun." & target.name & ".interchromosomal.bed"),
+            myopen(prefix & ".genoiser." & target.name & ".soft.bed"),
+            myopen(prefix & ".genoiser." & target.name & ".mq0.bed"),
+            myopen(prefix & ".genoiser." & target.name & ".weird.bed"),
+            myopen(prefix & ".genoiser." & target.name & ".mismatches.bed"),
+            myopen(prefix & ".genoiser." & target.name & ".interchromosomal.bed"),
           ]
 
         writefn(softs, depths, fhs[0], target.name, start, min_depth=min_depth, min_value=min_value)
@@ -558,7 +558,7 @@ proc main() =
       if a < b: return -1
       else: return 1
       )
-    echo format("\nmosfun utility programs.\nversion: $#\n", version)
+    echo format("\ngenoiser utility programs.\nversion: $#\n", version)
 
     for k in hkeys:
       echo format("	• $1: $2", k & repeat(" ", 20 - len(k)), helps[k])

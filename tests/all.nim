@@ -1,1 +1,1 @@
-import ./mosfun_test
+import ./genoiser_test

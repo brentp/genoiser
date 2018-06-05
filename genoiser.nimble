@@ -11,7 +11,7 @@ license       = "MIT"
 requires "hts >= 0.1.9", "docopt", "binaryheap", "kexpr"
 srcDir = "src"
 
-bin = @["mosfun"]
+bin = @["genoiser"]
 
 
 skipDirs = @["tests"]
@@ -19,15 +19,15 @@ skipDirs = @["tests"]
 import ospaths,strutils
 
 task test, "run the tests":
-  exec "nim c --lineDir:on --debuginfo -r tests/all"
+  exec "nim c --lineDir:on --debuginfo -r --threads:on tests/all"
 
 #before test:
 #  exec "c2nim src/hts/private/hts_concat.h"
 
 task docs, "Builds documentation":
-  mkDir("docs"/"mosfun")
+  mkDir("docs"/"genoiser")
   #exec "nim doc2 --verbosity:0 --hints:off -o:docs/index.html  src/hts.nim"
-  for file in listfiles("src/mosfun"):
+  for file in listfiles("src/genoiser"):
     if file.endswith("value.nim"): continue
     if splitfile(file).ext == ".nim":
       exec "nim doc2 --verbosity:0 --hints:off -o:" & "docs" /../ file.changefileext("html").split("/", 1)[1] & " " & file
