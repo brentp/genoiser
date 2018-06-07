@@ -297,8 +297,6 @@ iterator aggregator*(fns: seq[string], sample_checker: string, fai:Fai, nthreads
       responses.del(index)
 
     jobi += 1
-    if jobi mod 100 == 0:
-      stderr.write_line $jobi
 
   cumulative_sum(accumulated)
   for m in ranges(accumulated, chrom):
@@ -493,14 +491,14 @@ Options:
   var mq0 = Fun(values:new_seq[int32](L+1), f:mq0fun)
   var weirds = Fun(values:new_seq[int32](L+1), f:weird)
   var misms = Fun(values:new_seq[int32](L+1), f:mismatchfun)
-  var inters = Fun(values:new_seq[int32](L+1), f:interchromosomal)
-  var fns = @[depths, softs, mq0, weirds, misms, inters]
+  var events = Fun(values:new_seq[int32](L+1), f:eventfun)
+  var fns = @[depths, softs, mq0, weirds, misms, events]
 
   for target in b.hdr.targets:
 
     var fhs: seq[File]
 
-    stderr.write_line target.name
+    #stderr.write_line target.name
     var start = 0
     while start < target.length.int:
       var stop = min(start + L, target.length.int)
@@ -520,14 +518,14 @@ Options:
             myopen(prefix & ".genoiser." & target.name & ".mq0.bed"),
             myopen(prefix & ".genoiser." & target.name & ".weird.bed"),
             myopen(prefix & ".genoiser." & target.name & ".mismatches.bed"),
-            myopen(prefix & ".genoiser." & target.name & ".interchromosomal.bed"),
+            myopen(prefix & ".genoiser." & target.name & ".event.bed"),
           ]
 
         writefn(softs, depths, fhs[0], target.name, start, min_depth=min_depth, min_value=min_value)
         writefn(mq0, depths, fhs[1], target.name, start, min_depth=min_depth, min_value=min_value)
         writefn(weirds, depths, fhs[2], target.name, start, min_depth=min_depth, min_value=min_value)
         writefn(misms, depths, fhs[3], target.name, start, min_depth=min_depth, min_value=min_value)
-        writefn(inters, depths, fhs[4], target.name, start, min_depth=min_depth, min_value=min_value)
+        writefn(events, depths, fhs[4], target.name, start, min_depth=min_depth, min_value=min_value)
         for f in fns:
           zeroMem(f.values[0].addr.pointer, f.values.len * sizeof(f.values[0]))
 
