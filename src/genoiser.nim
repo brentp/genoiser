@@ -130,20 +130,22 @@ proc eventfun*(aln:Record, posns:var seq[mrange]) =
   ## eventfun is an example of a `fun` that can be sent to `genoiser`.
   ## it sets positions where there are soft-clips, hard-clips, insertions, or deletions.
   var f = aln.flag
-  if f.unmapped or f.secondary or f.supplementary or f.qcfail or f.dup: return
+  if f.unmapped or f.secondary or f.qcfail or f.dup: return
   var cig = aln.cigar
   if cig.len == 1: return
   var pos = aln.start
+
+  let delta = if f.reverse: -1 else: 1
 
   for op in cig:
     case op.op:
     of CigarOp.soft_clip, CigarOp.hard_clip, CigarOp.insert:
       # for this function, we want the exact break-points, not the span of the event,
       # so we increment the position and the one that follows it.
-      posns.add((pos, pos+1, 1))
+      posns.add((pos, pos+1, delta))
     of CigarOp.deletion:
-      posns.add((pos, pos+1, 1))
-      posns.add((pos+op.len, pos+op.len+1, 1))
+      posns.add((pos, pos+1, delta))
+      posns.add((pos+op.len, pos+op.len+1, delta))
     else:
       discard
     if op.consumes.reference:
@@ -228,8 +230,10 @@ proc sample_counter(fs: seq[string], sample_checker: string, chrom_len:int, s: p
   for f in fs:
     var fh = hts_open(f.cstring, "r")
     var v = read_line(fh, kstr.addr, sample_ok, 0)
-    if sc.chrom != v.chrom:
+    if v.chrom != "" and sc.chrom != v.chrom:
       quit "got different chromosome values:" & sc.chrom & ", " & v.chrom
+    if v.chrom == "":
+      stderr.write_line "no lines found in:" & f & " (this can happen for small chromosomes)"
     while v.stop != 0:
       when defined(debug):
         if sc.arr == nil:
@@ -339,7 +343,7 @@ proc mismatchfun(aln:Record, posns: var seq[mrange]) =
   var f = aln.flag
   if f.unmapped or f.secondary or f.qcfail or f.dup: return
   var nm = tag[int](aln, "NM")
-  if nm.isNone or nm.get < 3: return
+  if nm.isNone or nm.get < 4: return
   posns.add((aln.start, aln.stop, 1))
 
 
@@ -406,21 +410,24 @@ proc aggregate_main(argv: seq[string]) =
 
 Arguments:
 
-  <per-sample-output>          the txt output from genoiser per-sample
+  <per-sample-output>      the txt output from genoiser per-sample
 
 Options:
-  -f --fasta <reference>        indexed fasta reference file required to get chromosome lengths.
-  -t --threads <threads>        number of processors to use for parallelization. [default: 12]
-  -e --expr <string>            per-sample filtering expression [default: "(value > 0) & ((value / depth) > 0.1)"]
-  -h --help                     show help
+  -f --fasta <path>         indexed fasta reference file required to get chromosome lengths.
+  -t --threads <INT>        number of processors to use for parallelization. [default: 12]
+  -n --n-samples <INT>      don't output lines where fewer than this many samples have the noise. larger values result in smaller files. [default: 2]
+  -e --expr <string>        per-sample filtering expression [default: "(value > 0) & ((value / depth) > 0.1)"]
+  -h --help                 show help
   """)
 
   let args = docopt(doc, argv=argv)
   #GC_disableMarkAndSweep()
 
-  var expr:string = ($args["--expr"]).strip(chars={'"'})
+  var
+    expr:string = ($args["--expr"]).strip(chars={'"'})
+    fai:Fai
+    n_samples = parseInt($args["--n-samples"])
 
-  var fai:Fai
   if $args["--fasta"] == "nil":
     quit "--fasta is required"
   if not open(fai, $args["--fasta"]):
@@ -433,7 +440,7 @@ Options:
     quit "error with expression"
 
   for iv in aggregator(@(args["<per-sample-output>"]), expr, fai, threads):
-    if iv.count == 0: continue
+    if iv.count < n_samples: continue
     stdout.write_line iv.chrom & "\t" & intToStr(iv.start) & "\t" & intToStr(iv.stop) & "\t" & intToStr(iv.count)
 
 proc writefn(a:Fun, depths:Fun, fh:File, chrom:string, start:int, min_depth:int=0, min_value:int=1) =
@@ -480,7 +487,7 @@ Options:
   let min_value = parseInt($args["--min-value"])
   var b:Bam
   open(b, fbam, index=true, fai=fasta)
-  discard b.set_option(FormatOption.CRAM_OPT_DECODE_MD, 0)
+  #discard b.set_option(FormatOption.CRAM_OPT_DECODE_MD, 0)
 
   if b == nil:
     quit "coudn't open bam: " & fbam
