@@ -255,7 +255,7 @@ iterator aggregator*(fns: seq[string], sample_checker: string, fai:Fai, nthreads
   var results = newSeq[sample_count](min(threads, fns.len))
   var accumulated = newSeq[int32](chrom_len + 1)
 
-  var batch_size = 10
+  var batch_size = 8
 
   if batch_size * threads > len(fns):
     batch_size = int(len(fns) / threads)
@@ -461,7 +461,7 @@ Arguments:
 
 Options:
 
-  -f --fasta     <path>           fasta file for use with CRAM files.
+  -f --fasta <fasta>              fasta file for use with CRAM files.
   -d --min-depth <int>            min depth to report a region [default: 5]
   -v --min-value <int>            min count to report a region [default: 1]
   -h --help                       show help
@@ -480,6 +480,8 @@ Options:
   let min_value = parseInt($args["--min-value"])
   var b:Bam
   open(b, fbam, index=true, fai=fasta)
+  discard b.set_option(FormatOption.CRAM_OPT_DECODE_MD, 0)
+
   if b == nil:
     quit "coudn't open bam: " & fbam
   if b.idx == nil:
