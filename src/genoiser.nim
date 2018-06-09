@@ -31,7 +31,11 @@ proc cumulative_sum[T](c: var seq[T]) =
   var tracker = T(0)
   for i, v in pairs(c):
     tracker += v
-    c[i] = tracker
+    # NOTE: even if the function allows negative values, we set to positive here.
+    # in the future, may want to keep the sign since that might be informative.
+    # for now, the only use I have is tracking strand bias where the actual strand does
+    # not matter, just the bias.
+    c[i] = tracker.abs
 
 iterator ranges*[T](counts: var seq[T], chrom:string): mchrom {.inline.} =
   var last_count = counts[0]
