@@ -130,26 +130,33 @@ proc softfun*(aln:Record, posns:var seq[mrange]) =
     if op.consumes.reference:
       pos += op.len
 
+const endDist = 8 # don't count bases within this many bases of the end of the read.
+
 proc eventfun*(aln:Record, posns:var seq[mrange]) =
   ## eventfun is an example of a `fun` that can be sent to `genoiser`.
   ## it sets positions where there are soft-clips, hard-clips, insertions, or deletions.
+  if aln.mapping_quality == 0: return
   var f = aln.flag
   if f.unmapped or f.secondary or f.qcfail or f.dup: return
   var cig = aln.cigar
   if cig.len == 1: return
   var pos = aln.start
 
-  let delta = if f.reverse: -1 else: 1
+  let delta = 1 #if f.reverse: -1 else: 1
 
   for op in cig:
     case op.op:
-    of CigarOp.soft_clip, CigarOp.hard_clip, CigarOp.insert:
+    of CigarOp.soft_clip, CigarOp.hard_clip:
+      posns.add((pos, pos+1, delta))
+    of CigarOp.insert:
       # for this function, we want the exact break-points, not the span of the event,
       # so we increment the position and the one that follows it.
-      posns.add((pos, pos+1, delta))
+      if pos - aln.start > endDist and aln.stop - pos > endDist:
+        posns.add((pos, pos+1, delta))
     of CigarOp.deletion:
-      posns.add((pos, pos+1, delta))
-      posns.add((pos+op.len, pos+op.len+1, delta))
+      if pos - aln.start > endDist and aln.stop - pos > endDist:
+        posns.add((pos, pos+1, delta))
+        posns.add((pos+op.len, pos+op.len+1, delta))
     else:
       discard
     if op.consumes.reference:
@@ -447,16 +454,15 @@ Options:
     if iv.count < n_samples: continue
     stdout.write_line iv.chrom & "\t" & intToStr(iv.start) & "\t" & intToStr(iv.stop) & "\t" & intToStr(iv.count)
 
-proc writefn(a:Fun, depths:Fun, fh:File, chrom:string, start:int, min_depth:int=0, min_value:int=1) =
+proc writefn(a:Fun, depths:Fun, fh:BGZ, chrom:string, start:int, min_depth:int=0, min_value:int=1) =
   for m in mranges(depths.values, a.values):
     if m.depth < min_depth: continue
     if m.value < min_value: continue
-    fh.write_line chrom & "\t" & intToStr(m.start + start) & "\t" & intToStr(m.stop + start) & "\t" & intToStr(m.depth) & "\t" & intToStr(m.value)
+    discard fh.write_line chrom & "\t" & intToStr(m.start + start) & "\t" & intToStr(m.stop + start) & "\t" & intToStr(m.depth) & "\t" & intToStr(m.value)
 
-proc myopen(path:string): File =
-  var fh:File
-  if not open(fh, path, fmWrite):
-    quit(2)
+proc myopen(path:string): BGZ =
+  var fh:BGZ
+  open(fh, path, "w1")
   return fh
 
 proc per_sample_main(argv: seq[string]) =
@@ -505,11 +511,11 @@ Options:
   var weirds = Fun(values:new_seq[int32](L+1), f:weird)
   var misms = Fun(values:new_seq[int32](L+1), f:mismatchfun)
   var events = Fun(values:new_seq[int32](L+1), f:eventfun)
-  var fns = @[depths, softs, mq0, weirds, misms, events]
+  var fns = @[depths, softs, weirds, misms, events, mq0]
 
   for target in b.hdr.targets:
 
-    var fhs: seq[File]
+    var fhs: seq[BGZ]
 
     #stderr.write_line target.name
     var start = 0
@@ -527,25 +533,25 @@ Options:
         if fhs == nil:
           fhs = @[
             # NOTE: fragile. make sure these are same orders as fns array above.
-            myopen(prefix & ".genoiser." & target.name & ".soft.bed"),
-            myopen(prefix & ".genoiser." & target.name & ".mq0.bed"),
-            myopen(prefix & ".genoiser." & target.name & ".weird.bed"),
-            myopen(prefix & ".genoiser." & target.name & ".mismatches.bed"),
-            myopen(prefix & ".genoiser." & target.name & ".event.bed"),
+            myopen(prefix & ".genoiser." & target.name & ".soft.bed.gz"),
+            myopen(prefix & ".genoiser." & target.name & ".weird.bed.gz"),
+            myopen(prefix & ".genoiser." & target.name & ".mismatches.bed.gz"),
+            myopen(prefix & ".genoiser." & target.name & ".event.bed.gz"),
+            #myopen(prefix & ".genoiser." & target.name & ".mq0.bed.gz"),
           ]
 
         writefn(softs, depths, fhs[0], target.name, start, min_depth=min_depth, min_value=min_value)
-        writefn(mq0, depths, fhs[1], target.name, start, min_depth=min_depth, min_value=min_value)
-        writefn(weirds, depths, fhs[2], target.name, start, min_depth=min_depth, min_value=min_value)
-        writefn(misms, depths, fhs[3], target.name, start, min_depth=min_depth, min_value=min_value)
-        writefn(events, depths, fhs[4], target.name, start, min_depth=min_depth, min_value=min_value)
+        writefn(weirds, depths, fhs[1], target.name, start, min_depth=min_depth, min_value=min_value)
+        writefn(misms, depths, fhs[2], target.name, start, min_depth=min_depth, min_value=min_value + 1)
+        writefn(events, depths, fhs[3], target.name, start, min_depth=min_depth, min_value=min_value)
+        #writefn(mq0, depths, fhs[4], target.name, start, min_depth=min_depth, min_value=min_value)
         for f in fns:
           zeroMem(f.values[0].addr.pointer, f.values.len * sizeof(f.values[0]))
 
       start += L
 
     for f in fhs:
-      f.close()
+      discard f.close()
 
 
 var progs = {
