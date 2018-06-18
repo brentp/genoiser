@@ -130,12 +130,12 @@ proc softfun*(aln:Record, posns:var seq[mrange]) =
     if op.consumes.reference:
       pos += op.len
 
-const endDist = 8 # don't count bases within this many bases of the end of the read.
+const endDist = 0 # don't count bases within this many bases of the end of the read.
 
 proc eventfun*(aln:Record, posns:var seq[mrange]) =
   ## eventfun is an example of a `fun` that can be sent to `genoiser`.
   ## it sets positions where there are soft-clips, hard-clips, insertions, or deletions.
-  if aln.mapping_quality == 0: return
+  #if aln.mapping_quality == 0: return
   var f = aln.flag
   if f.unmapped or f.secondary or f.qcfail or f.dup: return
   var cig = aln.cigar
@@ -542,7 +542,7 @@ Options:
 
         writefn(softs, depths, fhs[0], target.name, start, min_depth=min_depth, min_value=min_value)
         writefn(weirds, depths, fhs[1], target.name, start, min_depth=min_depth, min_value=min_value)
-        writefn(misms, depths, fhs[2], target.name, start, min_depth=min_depth, min_value=min_value + 1)
+        writefn(misms, depths, fhs[2], target.name, start, min_depth=min_depth, min_value=6)
         writefn(events, depths, fhs[3], target.name, start, min_depth=min_depth, min_value=min_value)
         #writefn(mq0, depths, fhs[4], target.name, start, min_depth=min_depth, min_value=min_value)
         for f in fns:
