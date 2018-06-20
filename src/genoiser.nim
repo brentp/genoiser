@@ -113,6 +113,21 @@ proc genoiser*(bam: Bam, funs: seq[Fun], chrom: string, start:int, stop:int): bo
     for f in funs:
       cumulative_sum(f.values)
 
+proc mismatchfun(aln:Record, posns: var seq[mrange]) =
+  ## require 4 or more total mismatch "events". NM:i counts a single
+  ## insertion of $N bases as $N mismatches. This subtracts so that each
+  ## insertion or deletion only counts as a single "mismatch"
+  var f = aln.flag
+  if f.unmapped or f.secondary or f.qcfail or f.dup: return
+  var nm = tag[int](aln, "NM")
+  if nm.isNone or nm.get < 4: return
+  var nmi = nm.get
+  for c in aln.cigar:
+    if c.op == CigarOp.insert or c.op == CigarOp.deletion:
+      nmi -= max(1, c.len - 1)
+      if nmi < 4: return
+  posns.add((aln.start, aln.stop, 1))
+
 proc softfun*(aln:Record, posns:var seq[mrange]) =
   ## softfun an example of a `fun` that can be sent to `genoiser`.
   ## it sets positions where there are soft-clips
@@ -349,13 +364,6 @@ proc concordant(aln:Record): bool {.inline.} =
   var f = aln.flag
   # check we have +- orientation.
   return f.reverse != f.mate_reverse and aln.start > aln.mate_pos == f.reverse
-
-proc mismatchfun(aln:Record, posns: var seq[mrange]) =
-  var f = aln.flag
-  if f.unmapped or f.secondary or f.qcfail or f.dup: return
-  var nm = tag[int](aln, "NM")
-  if nm.isNone or nm.get < 4: return
-  posns.add((aln.start, aln.stop, 1))
 
 
 proc fragfun*(aln:Record, posns:var seq[mrange]) =
