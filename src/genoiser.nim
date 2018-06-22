@@ -120,12 +120,12 @@ proc mismatchfun(aln:Record, posns: var seq[mrange]) =
   var f = aln.flag
   if f.unmapped or f.secondary or f.qcfail or f.dup: return
   var nm = tag[int](aln, "NM")
-  if nm.isNone or nm.get < 4: return
+  if nm.isNone or nm.get < 5: return
   var nmi = nm.get
   for c in aln.cigar:
     if c.op == CigarOp.insert or c.op == CigarOp.deletion:
       nmi -= max(1, c.len - 1)
-      if nmi < 4: return
+      if nmi < 5: return
   posns.add((aln.start, aln.stop, 1))
 
 proc softfun*(aln:Record, posns:var seq[mrange]) =
@@ -150,14 +150,14 @@ const endDist = 0 # don't count bases within this many bases of the end of the r
 proc eventfun*(aln:Record, posns:var seq[mrange]) =
   ## eventfun is an example of a `fun` that can be sent to `genoiser`.
   ## it sets positions where there are soft-clips, hard-clips, insertions, or deletions.
-  #if aln.mapping_quality == 0: return
-  var f = aln.flag
+  if aln.mapping_quality == 0: return
+  let f = aln.flag
   if f.unmapped or f.secondary or f.qcfail or f.dup: return
-  var cig = aln.cigar
+  let cig = aln.cigar
   if cig.len == 1: return
   var pos = aln.start
 
-  let delta = 1 #if f.reverse: -1 else: 1
+  let delta = if f.reverse: -1 else: 1
 
   for op in cig:
     case op.op:
@@ -400,7 +400,7 @@ proc mq0fun*(aln:Record, posns:var seq[mrange]) =
   if aln.mapping_quality != 0: return
   var f = aln.flag
   if f.unmapped or f.qcfail or f.dup: return
-  refposns(aln, posns)
+  posns.add((aln.start, aln.stop, 1))
 
 proc interchromosomal_splitter*(aln:Record, posns:var seq[mrange]) =
   for sp in aln.splitters:
@@ -415,11 +415,17 @@ proc interchromosomal*(aln:Record, posns:var seq[mrange]) =
   if f.unmapped or f.secondary or f.qcfail or f.dup: return
   if aln.b.core.tid == aln.b.core.mtid:
     if abs(aln.start - aln.mate_pos) > 10000000:
-      refposns(aln, posns)
+      posns.add((aln.start, aln.stop, 1))
+    else:
+      # check for splitters to another chrom
+      for sp in aln.splitters:
+        if sp.qual == 0: continue
+        if sp.chrom == aln.chrom: continue
+        posns.add((aln.start, aln.stop, 1))
     return
   if aln.b.core.tid == -1 or aln.b.core.mtid == -1: return
   # on different chroms
-  refposns(aln, posns)
+  posns.add((aln.start, aln.stop, 1))
 
 proc aggregate_main(argv: seq[string]) =
 
@@ -468,10 +474,12 @@ proc writefn(a:Fun, depths:Fun, fh:BGZ, chrom:string, start:int, min_depth:int=0
     if m.value < min_value: continue
     discard fh.write_line chrom & "\t" & intToStr(m.start + start) & "\t" & intToStr(m.stop + start) & "\t" & intToStr(m.depth) & "\t" & intToStr(m.value)
 
-proc myopen(path:string): BGZ =
-  var fh:BGZ
-  open(fh, path, "w1")
-  return fh
+proc myopen(prefix, chrom, event:string): BGZ =
+
+  createDir(prefix & "/" & event)
+  # prefix & ".genoiser." & target.name & ".soft.bed.gz")
+  var path = prefix / event / chrom & ".genoiser." & event & ".bed.gz"
+  open(result, path, "w1")
 
 proc per_sample_main(argv: seq[string]) =
 
@@ -481,7 +489,7 @@ proc per_sample_main(argv: seq[string]) =
 
 Arguments:
 
-  <PREFIX>       output path prefix
+  <PREFIX>       output prefix (must be unique for each sample)
   <BAM-or-CRAM>  the alignment file.
 
 Options:
@@ -515,11 +523,12 @@ Options:
   var L = 5000000
   var depths = Fun(values:new_seq[int32](L+1), f:depthfun)
   var softs = Fun(values:new_seq[int32](L+1), f:softfun)
-  var mq0 = Fun(values:new_seq[int32](L+1), f:mq0fun)
+  var interc = Fun(values:new_seq[int32](L+1), f:interchromosomal)
   var weirds = Fun(values:new_seq[int32](L+1), f:weird)
   var misms = Fun(values:new_seq[int32](L+1), f:mismatchfun)
   var events = Fun(values:new_seq[int32](L+1), f:eventfun)
-  var fns = @[depths, softs, weirds, misms, events, mq0]
+  var mq0 = Fun(values:new_seq[int32](L+1), f:mq0fun)
+  var fns = @[depths, softs, weirds, misms, events, interc, mq0]
 
   for target in b.hdr.targets:
 
@@ -541,18 +550,20 @@ Options:
         if fhs == nil:
           fhs = @[
             # NOTE: fragile. make sure these are same orders as fns array above.
-            myopen(prefix & ".genoiser." & target.name & ".soft.bed.gz"),
-            myopen(prefix & ".genoiser." & target.name & ".weird.bed.gz"),
-            myopen(prefix & ".genoiser." & target.name & ".mismatches.bed.gz"),
-            myopen(prefix & ".genoiser." & target.name & ".event.bed.gz"),
-            #myopen(prefix & ".genoiser." & target.name & ".mq0.bed.gz"),
+            myopen(prefix, target.name, "soft"),
+            myopen(prefix, target.name, "weird"),
+            myopen(prefix, target.name, "mismatches"),
+            myopen(prefix, target.name, "event"),
+            myopen(prefix, target.name, "interc"),
+            myopen(prefix, target.name, "mq0"),
           ]
 
         writefn(softs, depths, fhs[0], target.name, start, min_depth=min_depth, min_value=min_value)
         writefn(weirds, depths, fhs[1], target.name, start, min_depth=min_depth, min_value=min_value)
         writefn(misms, depths, fhs[2], target.name, start, min_depth=min_depth, min_value=6)
         writefn(events, depths, fhs[3], target.name, start, min_depth=min_depth, min_value=min_value)
-        #writefn(mq0, depths, fhs[4], target.name, start, min_depth=min_depth, min_value=min_value)
+        writefn(interc, depths, fhs[4], target.name, start, min_depth=min_depth, min_value=min_value)
+        writefn(mq0, depths, fhs[5], target.name, start, min_depth=min_depth, min_value=min_value + 2)
         for f in fns:
           zeroMem(f.values[0].addr.pointer, f.values.len * sizeof(f.values[0]))
 
