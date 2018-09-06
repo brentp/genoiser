@@ -11,7 +11,7 @@ import algorithm
 import threadpool
 import kexpr
 
-type 
+type
   mrange* = tuple[start:int, stop:int, count: int]
   mchrom* = ref object
       chrom:string
@@ -86,7 +86,7 @@ proc genoiser*(bam: Bam, funs: seq[Fun], chrom: string, start:int, stop:int): bo
     raise newException(KeyError, "chromosome not found:" & chrom)
 
   for i, f in funs:
-    if f.values == nil or f.values.len != stop - start + 1:
+    if f.values.len != stop - start + 1:
       echo "creating new seq"
       f.values = new_seq[int32](stop - start)
 
@@ -131,9 +131,9 @@ proc mismatchfun(aln:Record, posns: var seq[mrange]) =
 proc softfun*(aln:Record, posns:var seq[mrange]) =
   ## softfun an example of a `fun` that can be sent to `genoiser`.
   ## it sets positions where there are soft-clips
-  var f = aln.flag
-  if f.unmapped or f.secondary or f.supplementary or f.qcfail or f.dup: return
-  var cig = aln.cigar
+  let f = aln.flag
+  if f.unmapped or f.qcfail or f.dup: return
+  let cig = aln.cigar
   if cig.len == 1: return
   var pos = aln.start
 
@@ -145,12 +145,12 @@ proc softfun*(aln:Record, posns:var seq[mrange]) =
     if op.consumes.reference:
       pos += op.len
 
-const endDist = 0 # don't count bases within this many bases of the end of the read.
+const endDist = 4 # don't count bases within this many bases of the end of the read.
 
 proc eventfun*(aln:Record, posns:var seq[mrange]) =
   ## eventfun is an example of a `fun` that can be sent to `genoiser`.
   ## it sets positions where there are soft-clips, hard-clips, insertions, or deletions.
-  if aln.mapping_quality == 0: return
+  #if aln.mapping_quality == 0: return
   let f = aln.flag
   if f.unmapped or f.secondary or f.qcfail or f.dup: return
   let cig = aln.cigar
@@ -176,6 +176,78 @@ proc eventfun*(aln:Record, posns:var seq[mrange]) =
       discard
     if op.consumes.reference:
       pos += op.len
+
+proc interchromosomal*(aln:Record, posns:var seq[mrange]) =
+  if aln.mapping_quality == 0: return
+  var f = aln.flag
+  if f.unmapped or f.secondary or f.qcfail or f.dup: return
+  if aln.b.core.tid == aln.b.core.mtid:
+    if abs(aln.start - aln.mate_pos) > 10000000:
+      posns.add((aln.start, aln.stop, 1))
+    else:
+      # check for splitters to another chrom
+      for sp in aln.splitters:
+        if sp.qual == 0: continue
+        if sp.chrom == aln.chrom: continue
+        posns.add((aln.start, aln.stop, 1))
+    return
+  if aln.b.core.tid == -1 or aln.b.core.mtid == -1: return
+  # on different chroms
+  posns.add((aln.start, aln.stop, 1))
+
+proc concordant(aln:Record): bool {.inline.} =
+  if aln.tid != aln.mate_tid: return false
+  # TODO: make these data-driven
+  if aln.isize.abs > 1000: return false
+  if aln.isize.abs < 20: return false
+  var f = aln.flag
+  # check we have +- orientation.
+  return f.reverse != f.mate_reverse and aln.start > aln.mate_pos == f.reverse
+
+
+proc weird*(aln:Record, posns:var seq[mrange]) =
+  ## weird increments from read-start to end for paired reads that are not in the usual orientation.
+  var f = aln.flag
+  if f.mate_unmapped or f.unmapped or f.qcfail or f.dup:
+    if f.mate_unmapped and not f.unmapped:
+      posns.add((aln.start, aln.stop, 1))
+    return
+
+  if aln.tid != aln.mate_tid:
+    posns.add((aln.start, aln.stop, 1))
+    return
+  if f.reverse == f.mate_reverse or aln.start < aln.mate_pos == f.reverse or (not aln.concordant):
+    if aln.isize.abs > 20:
+        posns.add((aln.start, aln.stop, 1))
+        return
+
+  for sp in aln.splitters:
+    if sp.qual == 0: continue
+    if sp.chrom == aln.chrom and (sp.start - aln.start).abs < 20000:
+      continue
+    posns.add((aln.start, aln.stop, 1))
+    break
+
+proc noisefun*(aln:Record, posns:var seq[mrange]) =
+  # mapping-quality 0
+  # # mismatches of 4 or more
+  # interchromosomal (or distant intra), including inter-chromsomal splitters.
+  let f = aln.flag
+  if f.unmapped or f.secondary or f.qcfail or f.dup: return
+  if aln.mapping_quality == 0:
+      posns.add((aln.start, aln.stop, 1))
+      return
+  var nm = tag[int](aln, "NM")
+  if nm.isNone and nm.get >= 4:
+      posns.add((aln.start, aln.stop, 1))
+      return
+
+  var l = posns.len
+  aln.interchromosomal(posns)
+  if l != posns.len:
+      return
+  aln.weird(posns)
+
 
 proc read_line(hf: ptr htsFile, kstr: ptr kstring_t, check_ok: proc(depth:int, value:int):bool, idx:int): crange {.inline, thread.} =
   
@@ -227,7 +299,7 @@ proc sample_counter(fs: seq[string], sample_checker: string, chrom_len:int, s: p
   ## using batches amortizes the cost of the zeroMem (which is not that high).
   var sc = s[]
 
-  if sc.arr == nil or sc.arr.len != chrom_len + 1:
+  if sc.arr.len != chrom_len + 1:
     stderr.write_line "error: cant set new length"
     quit 2
   else:
@@ -277,7 +349,6 @@ proc sample_counter(fs: seq[string], sample_checker: string, chrom_len:int, s: p
 
 
 iterator aggregator*(fns: seq[string], sample_checker: string, fai:Fai, nthreads:int): mchrom =
-  var a: seq[int32]
   var threads = min(nthreads, len(fns))
 
   var (chrom, chrom_len) = get_chrom_len(fns[0], fai)
@@ -302,7 +373,7 @@ iterator aggregator*(fns: seq[string], sample_checker: string, fai:Fai, nthreads
 
   while results.len != 0:
 
-    var index = awaitAny(responses)
+    var index = blockUntilAny(responses)
     if index == -1:
       quit "got unexpected value from await"
 
@@ -354,46 +425,8 @@ proc depthfun*(aln:Record, posns:var seq[mrange]) =
   ## it sets reports the depth at each position
   var f = aln.flag
   if f.unmapped or f.secondary or f.qcfail or f.dup: return
-  refposns(aln, posns)
-
-proc concordant(aln:Record): bool {.inline.} =
-  if aln.tid != aln.mate_tid: return false
-  # TODO: make these data-driven
-  if aln.isize.abs > 600: return
-  if aln.isize.abs < 50: return
-  var f = aln.flag
-  # check we have +- orientation.
-  return f.reverse != f.mate_reverse and aln.start > aln.mate_pos == f.reverse
-
-
-proc fragfun*(aln:Record, posns:var seq[mrange]) =
-  ## if true proper pair, then increment the entire fragment. otherwise, increment
-  ## the start and end of each read separately.
-  #if aln.mapping_quality < 5: return
-  var f = aln.flag
-  if f.unmapped or f.secondary or f.qcfail or f.dup: return
-  #if aln.tid != aln.mate_tid: return
-  #if not f.proper_pair: return
-  if aln.concordant:
-    # only count the fragment once.
-    if f.reverse: return
-    if aln.isize < 0:
-      quit "BAD"
-    posns.add((aln.start, aln.start + aln.isize, 1))
-  #else:
-    #echo aln.flag
-    #echo "disconcordant"
-    #posns.add((aln.start, aln.stop, 1))
-
-
-proc weird*(aln:Record, posns:var seq[mrange]) =
-  ## weird increments from read-start to end for paired reads that are not in the usual orientation.
-  var f = aln.flag
-  if f.mate_unmapped or f.unmapped or f.secondary or f.qcfail or f.dup: return
-  #if aln.stop > aln.mate_pos: return
-  if aln.tid != aln.mate_tid: return
-  if f.reverse == f.mate_reverse or aln.start < aln.mate_pos == f.reverse:
-    posns.add((aln.start, aln.stop, 1))
+  #refposns(aln, posns)
+  posns.add((aln.start, aln.stop, 1))
 
 proc mq0fun*(aln:Record, posns:var seq[mrange]) =
   ## this is an example function that increments all reference locations with mapping-quality 0.
@@ -402,30 +435,19 @@ proc mq0fun*(aln:Record, posns:var seq[mrange]) =
   if f.unmapped or f.qcfail or f.dup: return
   posns.add((aln.start, aln.stop, 1))
 
+proc mqlt60fun*(aln:Record, posns:var seq[mrange]) =
+  ## increment anywhere there's a mapping quality less than 60
+  if aln.mapping_quality >= 60'u8: return
+  var f = aln.flag
+  if f.unmapped or f.secondary or f.qcfail or f.dup: return
+  posns.add((aln.start, aln.stop, 1))
+
 proc interchromosomal_splitter*(aln:Record, posns:var seq[mrange]) =
   for sp in aln.splitters:
     if sp.qual == 0: continue
     if sp.chrom == aln.chrom: continue
     softfun(aln, posns)
     return
-
-proc interchromosomal*(aln:Record, posns:var seq[mrange]) =
-  if aln.mapping_quality == 0: return
-  var f = aln.flag
-  if f.unmapped or f.secondary or f.qcfail or f.dup: return
-  if aln.b.core.tid == aln.b.core.mtid:
-    if abs(aln.start - aln.mate_pos) > 10000000:
-      posns.add((aln.start, aln.stop, 1))
-    else:
-      # check for splitters to another chrom
-      for sp in aln.splitters:
-        if sp.qual == 0: continue
-        if sp.chrom == aln.chrom: continue
-        posns.add((aln.start, aln.stop, 1))
-    return
-  if aln.b.core.tid == -1 or aln.b.core.mtid == -1: return
-  # on different chroms
-  posns.add((aln.start, aln.stop, 1))
 
 proc aggregate_main(argv: seq[string]) =
 
@@ -522,13 +544,16 @@ Options:
 
   var L = 5000000
   var depths = Fun(values:new_seq[int32](L+1), f:depthfun)
-  var softs = Fun(values:new_seq[int32](L+1), f:softfun)
-  var interc = Fun(values:new_seq[int32](L+1), f:interchromosomal)
-  var weirds = Fun(values:new_seq[int32](L+1), f:weird)
-  var misms = Fun(values:new_seq[int32](L+1), f:mismatchfun)
-  var events = Fun(values:new_seq[int32](L+1), f:eventfun)
-  var mq0 = Fun(values:new_seq[int32](L+1), f:mq0fun)
-  var fns = @[depths, softs, weirds, misms, events, interc, mq0]
+  #var softs = Fun(values:new_seq[int32](L+1), f:softfun)
+  #var interc = Fun(values:new_seq[int32](L+1), f:interchromosomal)
+  #var weirds = Fun(values:new_seq[int32](L+1), f:weird)
+  #var misms = Fun(values:new_seq[int32](L+1), f:mismatchfun)
+  #var events = Fun(values:new_seq[int32](L+1), f:eventfun)
+  #var mq0 = Fun(values:new_seq[int32](L+1), f:mq0fun)
+  #var mqlt60 = Fun(values:new_seq[int32](L+1), f:mqlt60fun)
+  var noise = Fun(values:new_seq[int32](L+1), f:noisefun)
+  #var fns = @[depths, softs, weirds, misms, events, interc, mq0, mqlt60]
+  var fns = @[depths, noise]
 
   for target in b.hdr.targets:
 
@@ -547,23 +572,28 @@ Options:
           zeroMem(f.values[0].addr.pointer, f.values.len * sizeof(f.values[0]))
 
       if genoiser(b, fns, target.name, start, stop):
-        if fhs == nil:
+        if fhs.len == 0:
           fhs = @[
             # NOTE: fragile. make sure these are same orders as fns array above.
-            myopen(prefix, target.name, "soft"),
-            myopen(prefix, target.name, "weird"),
-            myopen(prefix, target.name, "mismatches"),
-            myopen(prefix, target.name, "event"),
-            myopen(prefix, target.name, "interc"),
-            myopen(prefix, target.name, "mq0"),
+            #myopen(prefix, target.name, "soft"),
+            #myopen(prefix, target.name, "weird"),
+            #myopen(prefix, target.name, "mismatches"),
+            #myopen(prefix, target.name, "event"),
+            #myopen(prefix, target.name, "interc"),
+            #myopen(prefix, target.name, "mq0"),
+            #myopen(prefix, target.name, "mqlt60"),
+            myopen(prefix, target.name, "noise"),
           ]
 
-        writefn(softs, depths, fhs[0], target.name, start, min_depth=min_depth, min_value=min_value)
-        writefn(weirds, depths, fhs[1], target.name, start, min_depth=min_depth, min_value=min_value)
-        writefn(misms, depths, fhs[2], target.name, start, min_depth=min_depth, min_value=6)
-        writefn(events, depths, fhs[3], target.name, start, min_depth=min_depth, min_value=min_value)
-        writefn(interc, depths, fhs[4], target.name, start, min_depth=min_depth, min_value=min_value)
-        writefn(mq0, depths, fhs[5], target.name, start, min_depth=min_depth, min_value=min_value + 2)
+        #writefn(softs, depths, fhs[0], target.name, start, min_depth=min_depth, min_value=min_value)
+        #writefn(weirds, depths, fhs[1], target.name, start, min_depth=min_depth, min_value=min_value)
+        #writefn(misms, depths, fhs[2], target.name, start, min_depth=min_depth, min_value=6)
+        #writefn(events, depths, fhs[3], target.name, start, min_depth=min_depth, min_value=min_value)
+        #writefn(interc, depths, fhs[4], target.name, start, min_depth=min_depth, min_value=min_value)
+        #writefn(mq0, depths, fhs[5], target.name, start, min_depth=min_depth, min_value=min_value + 2)
+        #writefn(mqlt60, depths, fhs[6], target.name, start, min_depth=min_depth, min_value=min_value + 2)
+        writefn(noise, depths, fhs[0], target.name, start, min_depth=min_depth, min_value=min_value + 2)
+
         for f in fns:
           zeroMem(f.values[0].addr.pointer, f.values.len * sizeof(f.values[0]))
 
