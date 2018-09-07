@@ -334,7 +334,7 @@ proc sample_counter(fs: seq[string], sample_checker: string, chrom_len:int, s: p
       stderr.write_line "no lines found in:" & f & " (this can happen for small chromosomes)"
     while v.stop != 0:
       when defined(debug):
-        if sc.arr == nil:
+        if sc.arr.len == 0:
           stderr.write_line "sc nil"
 
         if v.stop >= sc.arr.len:
