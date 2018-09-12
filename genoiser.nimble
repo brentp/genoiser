@@ -1,6 +1,6 @@
 # Package
 
-version       = "0.2.0"
+version       = "0.2.1"
 author        = "Brent Pedersen"
 description   = "write functions, get summaries of genomic data"
 license       = "MIT"
@@ -8,10 +8,11 @@ license       = "MIT"
 
 # Dependencies
 
-requires "hts >= 0.2.0", "docopt", "kexpr"
+requires "hts >= 0.2.3", "docopt#0abba63", "kexpr"
 srcDir = "src"
 
 bin = @["genoiser"]
+installExt = @["nim"]
 
 
 skipDirs = @["tests"]
