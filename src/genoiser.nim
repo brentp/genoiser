@@ -28,14 +28,18 @@ type
 
 proc cumulative_sum[T](c: var seq[T]) =
   # convert from an array of start/end inc/decs to actual coverage.
-  var tracker = T(0)
+  # tracker allows for overflow/underflow for the data type T and just
+  # keeps the vlaue at T.high until it drops back down again.
+  var tracker:int64
   for i, v in pairs(c):
-    tracker += v
-    # NOTE: even if the function allows negative values, we set to positive here.
-    # in the future, may want to keep the sign since that might be informative.
-    # for now, the only use I have is tracking strand bias where the actual strand does
-    # not matter, just the bias.
-    c[i] = tracker.abs
+    tracker += v.int64
+    if tracker > T.high.int64:
+      c[i] = T.high
+      #tot = tracker.float64
+    elif tracker < T.low.int64:
+      c[i] = T.low.abs
+    else:
+      c[i] = T(tracker.abs)
 
 iterator ranges*[T](counts: var seq[T], chrom:string): mchrom {.inline.} =
   var last_count = counts[0]
@@ -67,11 +71,11 @@ iterator mranges*[T](depth: var seq[T], values: var seq[T]): mpair {.inline.} =
     yield (last_i, len(depth), last_pair[0].int, last_pair[1].int)
 
 type
-  Fun* = ref object
-    values*: seq[int32]
+  Fun*[T] = ref object
+    values*: seq[T]
     f*: proc(aln:Record, posns:var seq[mrange])
 
-proc genoiser*(bam: Bam, funs: seq[Fun], chrom: string, start:int, stop:int): bool =
+proc genoiser*[T](bam: Bam, funs: seq[Fun[T]], chrom: string, start:int, stop:int): bool =
   ## for the chromosome given, call each f in fs if skip_fun returns false and return
   ## an array for each function in fs.
   result = false
@@ -88,7 +92,7 @@ proc genoiser*(bam: Bam, funs: seq[Fun], chrom: string, start:int, stop:int): bo
   for i, f in funs:
     if f.values.len != stop - start + 1:
       echo "creating new seq"
-      f.values = new_seq[int32](stop - start)
+      f.values = new_seq[T](stop - start)
 
   var posns = new_seq_of_cap[mrange](200)
 
@@ -106,8 +110,25 @@ proc genoiser*(bam: Bam, funs: seq[Fun], chrom: string, start:int, stop:int): bo
         if se_stop >= f.values.len:
           se_stop = f.values.len - 1
         result = true
-        f.values[se_start] += int32(se.count)
-        f.values[se_stop] -= int32(se.count)
+
+        var
+          sv = f.values[se_start].int64# + se.count.int64
+          ev = f.values[se_stop].int64# - se.count.int64
+          c = se.count
+
+        if sv + se.count.int64 > T.high.int64:
+          c = int(T.high.int64 - sv)
+
+        if ev - c.int64 < T.low.int64:
+          c = int(T.low.int64 - ev)
+          quit "how"
+
+        if ev - c.int64 > T.high.int64:
+            quit "BAD"
+
+        f.values[se_start] += T(c)
+        #echo f.values.len, " ", se_stop, " ", ev
+        f.values[se_stop] -= T(c)
 
   if result:
     for f in funs:
@@ -543,7 +564,7 @@ Options:
     quit "coudn't open bam index for " & fbam
 
   var L = 5000000
-  var depths = Fun(values:new_seq[int32](L+1), f:depthfun)
+  var depths = Fun[int16](values:new_seq[int16](L+1), f:depthfun)
   #var softs = Fun(values:new_seq[int32](L+1), f:softfun)
   #var interc = Fun(values:new_seq[int32](L+1), f:interchromosomal)
   #var weirds = Fun(values:new_seq[int32](L+1), f:weird)
@@ -551,7 +572,7 @@ Options:
   #var events = Fun(values:new_seq[int32](L+1), f:eventfun)
   #var mq0 = Fun(values:new_seq[int32](L+1), f:mq0fun)
   #var mqlt60 = Fun(values:new_seq[int32](L+1), f:mqlt60fun)
-  var noise = Fun(values:new_seq[int32](L+1), f:noisefun)
+  var noise = Fun[int16](values:new_seq[int16](L+1), f:noisefun)
   #var fns = @[depths, softs, weirds, misms, events, interc, mq0, mqlt60]
   var fns = @[depths, noise]
 
@@ -571,7 +592,7 @@ Options:
           f.values.set_len(stop - start + 1)
           zeroMem(f.values[0].addr.pointer, f.values.len * sizeof(f.values[0]))
 
-      if genoiser(b, fns, target.name, start, stop):
+      if genoiser[int16](b, fns, target.name, start, stop):
         if fhs.len == 0:
           fhs = @[
             # NOTE: fragile. make sure these are same orders as fns array above.
