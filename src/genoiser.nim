@@ -71,9 +71,35 @@ iterator mranges*[T](depth: var seq[T], values: var seq[T]): mpair {.inline.} =
     yield (last_i, len(depth), last_pair[0].int, last_pair[1].int)
 
 type
-  Fun*[T] = ref object
+  Fun* {.shallow.} [T]  = ref object
     values*: seq[T]
     f*: proc(aln:Record, posns:var seq[mrange])
+
+
+proc genoiser*[T](bam_path:string, reference: string, funcs: seq[Fun[T]], chrom: string, threads:int): bool =
+    var bam:Bam
+    open(bam, bam_path, fai=reference, index=true)
+    if bam == nil:
+        quit "couldn't open bam path"
+    var target:Target
+    for tgt in bam.hdr.targets:
+        if tgt.name == chrom:
+            target = tgt
+    if target == nil:
+        raise newException(ValueError, "chromosome not found:" & chrom)
+    for i, f in funcs:
+      if f.values.len != target.length.int + 1:
+        f.values = newSeq[T](target.length.int + 1)
+
+
+    var channel : Channel[seq[Fun[T]]]
+
+    proc consumer(funcs: seq[Fun[T]]) =
+        echo funcs.len
+
+    channel.open()
+
+
 
 proc genoiser*[T](bam: Bam, funs: seq[Fun[T]], chrom: string, start:int, stop:int): bool =
   ## for the chromosome given, call each f in fs if skip_fun returns false and return
@@ -89,11 +115,6 @@ proc genoiser*[T](bam: Bam, funs: seq[Fun[T]], chrom: string, start:int, stop:in
   if tid == -1:
     raise newException(KeyError, "chromosome not found:" & chrom)
 
-  for i, f in funs:
-    if f.values.len != stop - start + 1:
-      echo "creating new seq"
-      f.values = new_seq[T](stop - start)
-
   var posns = new_seq_of_cap[mrange](200)
 
   for record in bam.queryi(tid, max(0, start - 1), stop + 1):
@@ -101,6 +122,10 @@ proc genoiser*[T](bam: Bam, funs: seq[Fun[T]], chrom: string, start:int, stop:in
       if posns.len != 0: posns.set_len(0)
       f.f(record, posns)
       for se in posns:
+        if f.values.len != stop - start + 1:
+          echo "genoiser:creating new seq"
+          f.values = new_seq[T](stop - start)
+
         var se_start = max(0, se.start - start)
         if se_start >= f.values.len:
           continue
