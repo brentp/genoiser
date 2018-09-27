@@ -137,8 +137,8 @@ proc genoiser*[T](bam: Bam, funs: seq[Fun[T]], chrom: string, start:int, stop:in
         result = true
 
         var
-          sv = f.values[se_start].int64# + se.count.int64
-          ev = f.values[se_stop].int64# - se.count.int64
+          sv = f.values[se_start].int64
+          ev = f.values[se_stop].int64
           c = se.count
 
         if sv + se.count.int64 > T.high.int64:
@@ -146,10 +146,9 @@ proc genoiser*[T](bam: Bam, funs: seq[Fun[T]], chrom: string, start:int, stop:in
 
         if ev - c.int64 < T.low.int64:
           c = int(T.low.int64 - ev)
-          quit "how"
 
         if ev - c.int64 > T.high.int64:
-            quit "BAD"
+            quit "BAD: ev:" & $ev & " c:" & $c
 
         f.values[se_start] += T(c)
         #echo f.values.len, " ", se_stop, " ", ev
