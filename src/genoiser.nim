@@ -26,7 +26,7 @@ type
     ## index of the file
     idx:int
 
-proc cumulative_sum[T](c: var seq[T]) =
+proc cumulative_sum*[T](c: var seq[T]) =
   # convert from an array of start/end inc/decs to actual coverage.
   # tracker allows for overflow/underflow for the data type T and just
   # keeps the vlaue at T.high until it drops back down again.
@@ -101,9 +101,11 @@ proc genoiser*[T](bam_path:string, reference: string, funcs: seq[Fun[T]], chrom:
 
 
 
-proc genoiser*[T](bam: Bam, funs: seq[Fun[T]], chrom: string, start:int, stop:int): bool =
+proc genoiser*[T](bam: Bam, funs: seq[Fun[T]], chrom: string, start:int, stop:int, cumsum:bool=true): bool =
   ## for the chromosome given, call each f in fs if skip_fun returns false and return
   ## an array for each function in fs.
+  ## if cumsum is false, the array of inc/decrement values will be returned, not the cumsum. this
+  ## allows combining multiple passes.
   result = false
 
   var tid: int = -1
@@ -154,7 +156,7 @@ proc genoiser*[T](bam: Bam, funs: seq[Fun[T]], chrom: string, start:int, stop:in
         #echo f.values.len, " ", se_stop, " ", ev
         f.values[se_stop] -= T(c)
 
-  if result:
+  if result and cumsum:
     for f in funs:
       cumulative_sum(f.values)
 
