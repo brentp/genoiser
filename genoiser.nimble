@@ -8,7 +8,7 @@ license       = "MIT"
 
 # Dependencies
 
-requires "hts >= 0.2.3", "docopt#0abba63", "kexpr"
+requires "hts >= 0.2.3", "docopt >= 0.6.8", "kexpr"
 srcDir = "src"
 
 bin = @["genoiser"]
