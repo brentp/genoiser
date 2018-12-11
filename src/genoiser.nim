@@ -119,7 +119,7 @@ proc genoiser*[T](bam: Bam, funs: seq[Fun[T]], chrom: string, start:int, stop:in
 
   var posns = new_seq_of_cap[mrange](200)
 
-  for record in bam.queryi(tid, max(0, start - 1), stop + 1):
+  for record in bam.query(tid, max(0, start - 1), stop + 1):
     for i, f in funs:
       if posns.len != 0: posns.set_len(0)
       f.f(record, posns)
@@ -366,7 +366,7 @@ proc sample_counter(fs: seq[string], sample_checker: string, chrom_len:int, s: p
   proc sample_ok(depth:int, value:int): bool =
     discard ke_set_int(ex.ke, vc, value)
     discard ke_set_int(ex.ke, dc, depth)
-    result = ex.get_bool()
+    result = ex.bool
     if ex.error() != 0:
       quit format("expresion error with value:$# depth:$#", value, depth)
   var kstr = kstring_t(l:0, m:0, s:nil)
