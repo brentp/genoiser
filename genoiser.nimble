@@ -1,6 +1,6 @@
 # Package
 
-version       = "0.2.3"
+version       = "0.2.4"
 author        = "Brent Pedersen"
 description   = "write functions, get summaries of genomic data"
 license       = "MIT"
