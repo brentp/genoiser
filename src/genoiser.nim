@@ -650,10 +650,9 @@ Options:
       discard f.close()
 
 
-var progs = {
-   "per-sample": per_sample_main,
-   "aggregate": aggregate_main
-}.toTable
+var progs = newTable[string, proc (argv: seq[string])]()
+progs["per-sample"] = per_sample_main
+progs["aggregate"] = aggregate_main
 
 var helps = {
    "per-sample": "calculate various metrics for a per-sample BAM/CRAM",
