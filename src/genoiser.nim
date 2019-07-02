@@ -224,24 +224,6 @@ proc eventfun*(aln:Record, posns:var seq[mrange]) =
     if op.consumes.reference:
       pos += op.len
 
-proc interchromosomal*(aln:Record, posns:var seq[mrange]) =
-  if aln.mapping_quality == 0: return
-  var f = aln.flag
-  if f.unmapped or f.secondary or f.qcfail or f.dup: return
-  if aln.b.core.tid == aln.b.core.mtid:
-    if abs(aln.start - aln.mate_pos) > 10000000:
-      posns.add((aln.start, aln.stop, 1))
-    else:
-      # check for splitters to another chrom
-      for sp in aln.splitters:
-        if sp.qual == 0: continue
-        if sp.chrom == aln.chrom: continue
-        posns.add((aln.start, aln.stop, 1))
-    return
-  if aln.b.core.tid == -1 or aln.b.core.mtid == -1: return
-  # on different chroms
-  posns.add((aln.start, aln.stop, 1))
-
 proc concordant(aln:Record): bool {.inline.} =
   if aln.tid != aln.mate_tid: return false
   # TODO: make these data-driven
@@ -250,50 +232,6 @@ proc concordant(aln:Record): bool {.inline.} =
   var f = aln.flag
   # check we have +- orientation.
   return f.reverse != f.mate_reverse and aln.start > aln.mate_pos == f.reverse
-
-
-proc weird*(aln:Record, posns:var seq[mrange]) =
-  ## weird increments from read-start to end for paired reads that are not in the usual orientation.
-  var f = aln.flag
-  if f.mate_unmapped or f.unmapped or f.qcfail or f.dup:
-    if f.mate_unmapped and not f.unmapped:
-      posns.add((aln.start, aln.stop, 1))
-    return
-
-  if aln.tid != aln.mate_tid:
-    posns.add((aln.start, aln.stop, 1))
-    return
-  if f.reverse == f.mate_reverse or aln.start < aln.mate_pos == f.reverse or (not aln.concordant):
-    if aln.isize.abs > 20:
-        posns.add((aln.start, aln.stop, 1))
-        return
-
-  for sp in aln.splitters:
-    if sp.qual == 0: continue
-    if sp.chrom == aln.chrom and (sp.start - aln.start).abs < 20000:
-      continue
-    posns.add((aln.start, aln.stop, 1))
-    break
-
-proc noisefun*(aln:Record, posns:var seq[mrange]) =
-  # mapping-quality 0
-  # # mismatches of 4 or more
-  # interchromosomal (or distant intra), including inter-chromsomal splitters.
-  let f = aln.flag
-  if f.unmapped or f.secondary or f.qcfail or f.dup: return
-  if aln.mapping_quality == 0:
-      posns.add((aln.start, aln.stop, 1))
-      return
-  var nm = tag[int](aln, "NM")
-  if nm.isNone and nm.get >= 4:
-      posns.add((aln.start, aln.stop, 1))
-      return
-
-  var l = posns.len
-  aln.interchromosomal(posns)
-  if l != posns.len:
-      return
-  aln.weird(posns)
 
 
 proc read_line(hf: ptr htsFile, kstr: ptr kstring_t, check_ok: proc(depth:int, value:int):bool, idx:int): crange {.inline, thread.} =
@@ -489,13 +427,6 @@ proc mqlt60fun*(aln:Record, posns:var seq[mrange]) =
   if f.unmapped or f.secondary or f.qcfail or f.dup: return
   posns.add((aln.start, aln.stop, 1))
 
-proc interchromosomal_splitter*(aln:Record, posns:var seq[mrange]) =
-  for sp in aln.splitters:
-    if sp.qual == 0: continue
-    if sp.chrom == aln.chrom: continue
-    softfun(aln, posns)
-    return
-
 proc aggregate_main(argv: seq[string]) =
 
   let doc = format("""
@@ -591,16 +522,16 @@ Options:
 
   var L = 5000000
   var depths = Fun[int16](values:new_seq[int16](L+1), f:depthfun)
-  #var softs = Fun(values:new_seq[int32](L+1), f:softfun)
+  var softs = Fun[int16](values:new_seq[int16](L+1), f:softfun)
   #var interc = Fun(values:new_seq[int32](L+1), f:interchromosomal)
   #var weirds = Fun(values:new_seq[int32](L+1), f:weird)
   #var misms = Fun(values:new_seq[int32](L+1), f:mismatchfun)
   #var events = Fun(values:new_seq[int32](L+1), f:eventfun)
   #var mq0 = Fun(values:new_seq[int32](L+1), f:mq0fun)
   #var mqlt60 = Fun(values:new_seq[int32](L+1), f:mqlt60fun)
-  var noise = Fun[int16](values:new_seq[int16](L+1), f:noisefun)
+  #var noise = Fun[int16](values:new_seq[int16](L+1), f:noisefun)
   #var fns = @[depths, softs, weirds, misms, events, interc, mq0, mqlt60]
-  var fns = @[depths, noise]
+  var fns = @[depths, softs]
 
   for target in b.hdr.targets:
 
@@ -622,14 +553,14 @@ Options:
         if fhs.len == 0:
           fhs = @[
             # NOTE: fragile. make sure these are same orders as fns array above.
-            #myopen(prefix, target.name, "soft"),
+            myopen(prefix, target.name, "soft"),
             #myopen(prefix, target.name, "weird"),
             #myopen(prefix, target.name, "mismatches"),
             #myopen(prefix, target.name, "event"),
             #myopen(prefix, target.name, "interc"),
             #myopen(prefix, target.name, "mq0"),
             #myopen(prefix, target.name, "mqlt60"),
-            myopen(prefix, target.name, "noise"),
+            #myopen(prefix, target.name, "noise"),
           ]
 
         #writefn(softs, depths, fhs[0], target.name, start, min_depth=min_depth, min_value=min_value)
@@ -639,7 +570,8 @@ Options:
         #writefn(interc, depths, fhs[4], target.name, start, min_depth=min_depth, min_value=min_value)
         #writefn(mq0, depths, fhs[5], target.name, start, min_depth=min_depth, min_value=min_value + 2)
         #writefn(mqlt60, depths, fhs[6], target.name, start, min_depth=min_depth, min_value=min_value + 2)
-        writefn(noise, depths, fhs[0], target.name, start, min_depth=min_depth, min_value=min_value + 2)
+        writefn(softs, depths, fhs[0], target.name, start, min_depth=min_depth, min_value=min_value)
+        #writefn(noise, depths, fhs[1], target.name, start, min_depth=min_depth, min_value=min_value + 2)
 
         for f in fns:
           zeroMem(f.values[0].addr.pointer, f.values.len * sizeof(f.values[0]))
@@ -654,17 +586,20 @@ var progs = newTable[string, proc (argv: seq[string])]()
 progs["per-sample"] = per_sample_main
 progs["aggregate"] = aggregate_main
 
-var helps = {
-   "per-sample": "calculate various metrics for a per-sample BAM/CRAM",
-   "aggregate": "aggregate many sample outputs of per-sample into single file"
-}.toTable
+var helps = newTable[string, string]()
+helps["per-sample"] = "calculate various metrics for a per-sample BAM/CRAM"
+helps["aggregate"] = "aggregate many sample outputs of per-sample into single file"
+#var helps = {
+#   "per-sample": "calculate various metrics for a per-sample BAM/CRAM",
+#   "aggregate": "aggregate many sample outputs of per-sample into single file"
+#}.toTable
 
-const version = "0.2.0"
+const version = "0.2.6"
 
 proc main() =
 
   var args = commandLineParams()
-  if len(args) < 1 or not progs.contains(args[0]):
+  if len(args) < 1 or (not progs.contains(args[0])):
     var hkeys = toSeq(keys(helps))
     sort(hkeys, proc(a, b: string): int =
       if a < b: return -1
