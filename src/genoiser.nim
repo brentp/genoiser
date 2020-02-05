@@ -7,6 +7,7 @@ import tables
 import docopt
 import sequtils
 import strutils
+import strformat
 import algorithm
 import threadpool
 import kexpr
@@ -85,7 +86,7 @@ proc genoiser*[T](bam_path:string, reference: string, funcs: seq[Fun[T]], chrom:
     for tgt in bam.hdr.targets:
         if tgt.name == chrom:
             target = tgt
-    if target == nil:
+    if target.name == "":
         raise newException(ValueError, "chromosome not found:" & chrom)
     for i, f in funcs:
       if f.values.len != target.length.int + 1:
@@ -101,7 +102,7 @@ proc genoiser*[T](bam_path:string, reference: string, funcs: seq[Fun[T]], chrom:
 
 
 
-proc genoiser*[T](bam: Bam, funs: seq[Fun[T]], chrom: string, start:int, stop:int, cumsum:bool=true): bool =
+proc genoiser*[T](bam: Bam, funs: var seq[Fun[T]], chrom: string, start:int, stop:int, cumsum:bool=true): bool =
   ## for the chromosome given, call each f in fs if skip_fun returns false and return
   ## an array for each function in fs.
   ## if cumsum is false, the array of inc/decrement values will be returned, not the cumsum. this
@@ -120,12 +121,12 @@ proc genoiser*[T](bam: Bam, funs: seq[Fun[T]], chrom: string, start:int, stop:in
   var posns = new_seq_of_cap[mrange](200)
 
   for record in bam.query(tid, max(0, start - 1), stop + 1):
-    for i, f in funs:
+    for i, f in funs.mpairs:
       if posns.len != 0: posns.set_len(0)
       f.f(record, posns)
       for se in posns:
-        if f.values.len != stop - start + 1:
-          echo "genoiser:creating new seq"
+        if f.values.len != stop - start:
+          echo &"genoiser:creating new seq, {f.values.len} vs {stop - start + 1}"
           f.values = new_seq[T](stop - start)
 
         var se_start = max(0, se.start - start)
@@ -173,7 +174,7 @@ proc mismatchfun(aln:Record, posns: var seq[mrange]) =
     if c.op == CigarOp.insert or c.op == CigarOp.deletion:
       nmi -= max(1, c.len - 1)
       if nmi < 5: return
-  posns.add((aln.start, aln.stop, 1))
+  posns.add((aln.start.int, aln.stop.int, 1))
 
 proc softfun*(aln:Record, posns:var seq[mrange]) =
   ## softfun an example of a `fun` that can be sent to `genoiser`.
@@ -182,7 +183,7 @@ proc softfun*(aln:Record, posns:var seq[mrange]) =
   if f.unmapped or f.qcfail or f.dup: return
   let cig = aln.cigar
   if cig.len == 1: return
-  var pos = aln.start
+  var pos = aln.start.int
 
   for op in cig:
     if op.op == CigarOp.soft_clip or op.op == CigarOp.hard_clip:
@@ -202,7 +203,7 @@ proc eventfun*(aln:Record, posns:var seq[mrange]) =
   if f.unmapped or f.secondary or f.qcfail or f.dup: return
   let cig = aln.cigar
   if cig.len == 1: return
-  var pos = aln.start
+  var pos = aln.start.int
 
   let delta = if f.reverse: -1 else: 1
 
@@ -391,7 +392,7 @@ iterator aggregator*(fns: seq[string], sample_checker: string, fai:Fai, nthreads
 proc refposns(aln:Record, posns:var seq[mrange]) {.inline.} =
   var c = aln.cigar
   # generate start, end pairs given a cigar string and a position offset.
-  var pos = aln.start
+  var pos = aln.start.int
   for op in c:
     var c = op.consumes
     if not c.reference:
@@ -411,21 +412,21 @@ proc depthfun*(aln:Record, posns:var seq[mrange]) =
   var f = aln.flag
   if f.unmapped or f.secondary or f.qcfail or f.dup: return
   #refposns(aln, posns)
-  posns.add((aln.start, aln.stop, 1))
+  posns.add((aln.start.int, aln.stop.int, 1))
 
 proc mq0fun*(aln:Record, posns:var seq[mrange]) =
   ## this is an example function that increments all reference locations with mapping-quality 0.
   if aln.mapping_quality != 0: return
   var f = aln.flag
   if f.unmapped or f.qcfail or f.dup: return
-  posns.add((aln.start, aln.stop, 1))
+  posns.add((aln.start.int, aln.stop.int, 1))
 
 proc mqlt60fun*(aln:Record, posns:var seq[mrange]) =
   ## increment anywhere there's a mapping quality less than 60
   if aln.mapping_quality >= 60'u8: return
   var f = aln.flag
   if f.unmapped or f.secondary or f.qcfail or f.dup: return
-  posns.add((aln.start, aln.stop, 1))
+  posns.add((aln.start.int, aln.stop.int, 1))
 
 proc aggregate_main(argv: seq[string]) =
 
