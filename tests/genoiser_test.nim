@@ -15,7 +15,7 @@ suite "genoiser-suite":
         found = true
         break
     check found
-    check depths.values.len == 2000000 - 1000000
+    check depths.values.len == 2000000 - 1000000 + 1
 
   test "test that empty returns false":
     check: not genoiser[int32](b, funs, "10", 1000000, 2000000)

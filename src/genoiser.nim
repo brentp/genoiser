@@ -125,9 +125,9 @@ proc genoiser*[T](bam: Bam, funs: var seq[Fun[T]], chrom: string, start:int, sto
       if posns.len != 0: posns.set_len(0)
       f.f(record, posns)
       for se in posns:
-        if f.values.len != stop - start:
+        if f.values.len != (stop - start) + 1:
           echo &"genoiser:creating new seq, {f.values.len} vs {stop - start + 1}"
-          f.values = new_seq[T](stop - start)
+          f.values = new_seq[T](stop - start + 1)
 
         var se_start = max(0, se.start - start)
         if se_start >= f.values.len:
